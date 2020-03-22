@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Just like 'ls -al' but also shows the octal permissions code.
+
+# d=${1:-'*'}
+
+gstat --printf="%A\t%a\t%U\t%G\t%.19y\t%n\n" * | gnumfmt --to=iec-i --field=6 --delimiter=' ' --suffix=B

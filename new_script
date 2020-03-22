@@ -14,7 +14,7 @@ ARGUMENTS
               ./new_script -n my_script
        -p path (optional) (default: $HOME/.local/bin/tools)
           Location to store path in. Pass in '.' for current directory
- 
+
 "
 
 while test $# -gt 0; do
@@ -47,7 +47,7 @@ if [[ -z "${name}" ]]; then
 fi
 
 if [[ -z "${path}" ]]; then
-    path=$HOME/.local/bin/tools
+    path=$HOME/code/scripts
 fi
 
 full=${path}/$name
