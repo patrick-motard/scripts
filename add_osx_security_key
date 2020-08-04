@@ -1,0 +1,4 @@
+#!/usr/bin/env ruby
+
+
+security add-generic-password -a "$USER" -s 'name_of_your_key' -w 'passphrase'
