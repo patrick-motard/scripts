@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+
+# TODO: Fix race condition. On a relaunch, it took 11 minutes to spin up the
+# swarm. By minute 9 or so the script saw that the billing pod was ready and
+# tried to start billing and failed in both containers.
+
+# TODO: rails console starts at the same time as the billing server. This means
+# that it doesn't pick up the local code changes. running reload! in the rails
+# console fixes this, except in the case of reloading/registering dependency
+# injections. Either make reload! include those, or make the rails console
+# start after the billing server is ready.
+
+# TODO: Convert this to a ruby script.
+
+wait_for_billing() {
+    for i in {1..999}
+    do
+      kubectl get pods -l role=app-server,service=billing | \
+        awk 'FNR == 2 {rc=($2=="1/1")}; END { exit !rc }' \
+        && break \
+        || echo "not ready yet"; sleep 1
+    done
+}
+
+session="scooter"
+window=${session}:0
+scooter_pane=${window}.0
+billing_pane=${window}.1
+rails_console_pane=${window}.2
+
+# TODO: Fix this not working correctly when the scooter session is already running.
+tmux send-keys -t "${scooter_pane}" C-c 'cd ~/code/zendesk/billing && scooter launch' C-m && \
+  wait_for_billing && \
+  tmux send-keys -t "${billing_pane}" C-c "cd ~/code/zendesk/billing && devspace dev --mode billing-app-server" C-m && \
+  tmux send-keys -t "${rails_console_pane}" C-c "cd ~/code/zendesk/billing && devspace run rails-console-billing-app-server" C-m
+
+# tmux send-keys -t "${scooter_pane}" C-c 'echo "got here"' C-m && \
+#   wait_for_sleepy && \
+#   tmux send-keys -t "${billing_pane}" C-c 'echo "got here too"' C-m && \
+#   tmux send-keys -t "${rails_console_pane}" C-c 'echo "and here as well"' C-m
