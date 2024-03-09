@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+#
+#
+# Usager: scooter-copy-to-local <remote-path> <local-path>
+#
+# Copy a file to the current directory
+# Example: scooter-copy-to-local /app/tmp/logs/billing.log billing.log
+#
+# Copy to directory relative to the current directory
+# Example: scooter-copy-to-local /app/tmp/logs/billing.log tmp/billing.log
+
+context=$(kubectl config current-context)
+namespace=$(kubectl config view | grep namespace | cut -d ":" -f 2 | awk NF)
+pod=$(kubectl get pods -l service=billing,role=app-server -o custom-columns=":metadata.name" | awk NF)
+remote="${namespace}/${pod}:${1}"
+
+copy_command="kubectl --context $context -n billing cp ${remote} ${PWD}/${2}"
+echo $copy_command
+$copy_command

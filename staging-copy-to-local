@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#
+pod=$1
+remote_path=$2
+local_path=$3
+
+kubectl --as admin --as-group system:masters --context pod998 -n billing cp "${pod}":$remote_path $local_path
