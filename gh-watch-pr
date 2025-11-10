@@ -1,0 +1,250 @@
+#!/usr/bin/env ruby
+# Watch GitHub Actions for the current branch's PR
+
+require 'json'
+require 'open3'
+require 'optparse'
+
+# Colors and symbols
+COLORS = {
+  red: "\e[0;31m",
+  green: "\e[0;32m",
+  yellow: "\e[1;33m",
+  blue: "\e[0;34m",
+  reset: "\e[0m"
+}
+
+SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+SUCCESS = '●'
+FAILURE = '✗'
+
+class PRWatcher
+  def initialize(options = {})
+    @spinner_index = 0
+    @fast_poll_interval = options[:interval] || 10
+    @poll_interval = @fast_poll_interval
+    @slow_poll_interval = options[:slow_interval] || 30
+    @last_sha = nil
+    @all_done = false
+    @first_render = true
+    @last_line_count = 0
+  end
+
+  def run
+    branch = current_branch
+    unless branch
+      error "Not in a git repository"
+      exit 1
+    end
+
+    pr_number = pr_number_for_branch(branch)
+    unless pr_number
+      error "No PR found for branch '#{branch}'"
+      exit 1
+    end
+
+    # Restore cursor on exit
+    trap('INT') { print "\e[?25h"; puts "\n\n#{color(:yellow)}Stopped watching#{color(:reset)}"; exit 0 }
+    trap('TERM') { print "\e[?25h"; puts "\n\n#{color(:yellow)}Stopped watching#{color(:reset)}"; exit 0 }
+
+    watch_loop(branch, pr_number)
+  end
+
+  private
+
+  def current_branch
+    stdout, stderr, status = Open3.capture3('git', 'rev-parse', '--abbrev-ref', 'HEAD')
+    status.success? ? stdout.strip : nil
+  end
+
+  def pr_number_for_branch(branch)
+    stdout, stderr, status = Open3.capture3('gh', 'pr', 'view', branch, '--json', 'number', '-q', '.number')
+    status.success? ? stdout.strip : nil
+  end
+
+  def pr_sha(pr_number)
+    stdout, stderr, status = Open3.capture3('gh', 'pr', 'view', pr_number, '--json', 'headRefOid', '-q', '.headRefOid')
+    status.success? ? stdout.strip : nil
+  end
+
+  def pr_checks(pr_number)
+    stdout, stderr, status = Open3.capture3('gh', 'pr', 'view', pr_number, '--json', 'statusCheckRollup')
+    return nil unless status.success?
+
+    data = JSON.parse(stdout)
+    data['statusCheckRollup']
+  rescue JSON::ParserError
+    nil
+  end
+
+  def watch_loop(branch, pr_number)
+    loop do
+      output = []
+
+      # Build header
+      output << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      output << "#{color(:blue)}Watching PR ##{pr_number}#{color(:reset)} (branch: #{color(:green)}#{branch}#{color(:reset)})"
+      output << "Press #{color(:yellow)}Ctrl+C#{color(:reset)} to exit"
+
+      # Check for SHA changes (new commits)
+      current_sha = pr_sha(pr_number)
+      if @last_sha && current_sha != @last_sha
+        output << ""
+        output << "#{color(:yellow)}⟳ New commit detected, resuming fast polling...#{color(:reset)}"
+        @all_done = false
+        @poll_interval = @fast_poll_interval
+      end
+      @last_sha = current_sha
+
+      # Get and display checks
+      checks = pr_checks(pr_number)
+
+      unless checks
+        output << ""
+        output << "#{color(:yellow)}No checks available yet...#{color(:reset)}"
+        render_output(output)
+        sleep @poll_interval
+        advance_spinner
+        next
+      end
+
+      all_complete = build_checks_display(checks, output)
+
+      if all_complete
+        # All checks complete
+        unless @all_done
+          output << ""
+          output << "#{color(:green)}✓ All checks complete!#{color(:reset)}"
+          output << "#{color(:blue)}Switching to slow polling (#{@slow_poll_interval}s)...#{color(:reset)}"
+          @all_done = true
+          @poll_interval = @slow_poll_interval
+        end
+      else
+        # Still running
+        if @all_done
+          output << ""
+          output << "#{color(:yellow)}⟳ Checks restarted, resuming fast polling...#{color(:reset)}"
+          @all_done = false
+          @poll_interval = @fast_poll_interval
+        end
+      end
+
+      output << ""
+      output << "#{color(:blue)}Next update in #{@poll_interval}s...#{color(:reset)}"
+
+      render_output(output)
+      sleep @poll_interval
+      advance_spinner
+    end
+  end
+
+  def render_output(lines)
+    if @first_render
+      # First time: clear screen and hide cursor
+      print "\e[2J\e[H\e[?25l"
+      @first_render = false
+    else
+      # Move cursor up to start of previous output
+      print "\e[#{@last_line_count}A\e[J"
+    end
+
+    # Print all lines
+    lines.each do |line|
+      puts line
+    end
+
+    @last_line_count = lines.length
+  end
+
+  def build_checks_display(checks, output)
+    total = 0
+    success = 0
+    failure = 0
+    pending = 0
+
+    output << ""
+    output << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    checks.each do |check|
+      name = check['name'] || check['context'] || 'Unknown'
+      status = check['status']
+      conclusion = check['conclusion']
+
+      total += 1
+
+      # Determine display status
+      symbol, color_key = case conclusion
+                          when 'SUCCESS'
+                            success += 1
+                            [SUCCESS, :green]
+                          when 'FAILURE', 'TIMED_OUT', 'STARTUP_FAILURE'
+                            failure += 1
+                            [FAILURE, :red]
+                          when 'SKIPPED', 'NEUTRAL'
+                            success += 1  # Count skipped as "done"
+                            ['○', :blue]
+                          else
+                            # Still in progress
+                            pending += 1
+                            if status == 'COMPLETED'
+                              ['?', :yellow]
+                            else
+                              [SPINNER_FRAMES[@spinner_index], :yellow]
+                            end
+                          end
+
+      output << "#{color(color_key)}#{symbol}#{color(:reset)} #{name}"
+    end
+
+    output << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    if total == 0
+      output << "#{color(:yellow)}No checks found#{color(:reset)}"
+      return false
+    end
+
+    output << "Total: #{total} | #{color(:green)}✓ #{success}#{color(:reset)} | " \
+              "#{color(:red)}✗ #{failure}#{color(:reset)} | #{color(:yellow)}⟳ #{pending}#{color(:reset)}"
+
+    pending == 0
+  end
+
+  def advance_spinner
+    @spinner_index = (@spinner_index + 1) % SPINNER_FRAMES.length
+  end
+
+  def color(name)
+    COLORS[name] || ''
+  end
+
+  def error(message)
+    STDERR.puts "#{color(:red)}Error: #{message}#{color(:reset)}"
+  end
+end
+
+# Parse command line options
+options = {}
+
+OptionParser.new do |opts|
+  opts.banner = "Usage: gh-watch-pr [options]"
+  opts.separator ""
+  opts.separator "Watch GitHub Actions for the current branch's PR"
+  opts.separator ""
+  opts.separator "Options:"
+
+  opts.on("-i", "--interval SECONDS", Integer, "Fast poll interval in seconds (default: 10)") do |interval|
+    options[:interval] = interval
+  end
+
+  opts.on("-s", "--slow-interval SECONDS", Integer, "Slow poll interval in seconds when all checks complete (default: 30)") do |interval|
+    options[:slow_interval] = interval
+  end
+
+  opts.on("-h", "--help", "Show this help message") do
+    puts opts
+    exit
+  end
+end.parse!
+
+# Run the watcher
+PRWatcher.new(options).run
