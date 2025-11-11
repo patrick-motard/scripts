@@ -47,7 +47,7 @@ class PRWatcher
     trap('INT') { print "\e[?25h"; puts "\n\n#{color(:yellow)}Stopped watching#{color(:reset)}"; exit 0 }
     trap('TERM') { print "\e[?25h"; puts "\n\n#{color(:yellow)}Stopped watching#{color(:reset)}"; exit 0 }
 
-    watch_loop(branch, pr_number)
+    watch_loop
   end
 
   private
@@ -77,9 +77,28 @@ class PRWatcher
     nil
   end
 
-  def watch_loop(branch, pr_number)
+  def watch_loop
     loop do
       output = []
+
+      # Check for branch changes
+      branch = current_branch
+      unless branch
+        error "Not in a git repository"
+        exit 1
+      end
+
+      pr_number = pr_number_for_branch(branch)
+      unless pr_number
+        output << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        output << "#{color(:yellow)}No PR found for branch '#{branch}'#{color(:reset)}"
+        output << "Waiting for PR or branch switch..."
+        output << ""
+        output << "#{color(:blue)}Checking again in #{@poll_interval}s...#{color(:reset)}"
+        render_output(output)
+        sleep @poll_interval
+        next
+      end
 
       # Build header
       output << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
