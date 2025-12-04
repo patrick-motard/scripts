@@ -1,0 +1,50 @@
+#!/bin/bash
+# Helper script for filter options menu
+
+CURRENT_STATUS="$1"
+CURRENT_REPO="$2"
+
+# Get available repos from arguments (passed as remaining args)
+shift 2
+REPOS=("$@")
+
+# Build filter menu
+MENU="Show all statuses\nShow only: Draft\nShow only: Review\nShow only: Approved\n---\nShow all repos"
+
+for repo in "${REPOS[@]}"; do
+    MENU="$MENU\nShow only: $repo"
+done
+
+MENU="$MENU\n---\nClear all filters\nCancel"
+
+action=$(echo -e "$MENU" | fzf \
+    --header="Current: status=${CURRENT_STATUS:-all} repo=${CURRENT_REPO:-all}" \
+    --height=20)
+
+case "$action" in
+    "Show all statuses")
+        echo "status:"
+        ;;
+    "Show only: Draft")
+        echo "status:draft"
+        ;;
+    "Show only: Review")
+        echo "status:review"
+        ;;
+    "Show only: Approved")
+        echo "status:approved"
+        ;;
+    "Show all repos")
+        echo "repo:"
+        ;;
+    "Show only: "*)
+        REPO="${action#Show only: }"
+        echo "repo:$REPO"
+        ;;
+    "Clear all filters")
+        echo "clear"
+        ;;
+    *)
+        echo "cancel"
+        ;;
+esac

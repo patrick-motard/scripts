@@ -1,0 +1,313 @@
+#!/bin/bash
+
+# Interactive PR selector using fzf
+# Usage: pr-select [team-open-prs options...]
+#   All options are passed to team-open-prs
+#   Keybindings:
+#     Ctrl-R: Reload/refresh cache
+#     Ctrl-X: Cache management menu
+#     Ctrl-S: Sort options
+#     Ctrl-F: Filter options
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CACHE_DIR="${HOME}/.cache/gh-pr-cache"
+
+# Default sort/filter settings
+SORT_BY="date"  # date, author, status, comments, repo
+SORT_ORDER="desc"  # asc, desc
+FILTER_STATUS=""  # "", draft, review, approved
+FILTER_REPO=""  # "", specific repo name
+
+# Check for required commands
+if ! command -v fzf &> /dev/null; then
+    echo "Error: fzf is not installed" >&2
+    exit 1
+fi
+
+if ! command -v jq &> /dev/null; then
+    echo "Error: jq is not installed" >&2
+    exit 1
+fi
+
+# Determine clipboard command based on OS
+if command -v pbcopy &> /dev/null; then
+    CLIP_CMD="pbcopy"
+elif command -v xclip &> /dev/null; then
+    CLIP_CMD="xclip -selection clipboard"
+elif command -v xsel &> /dev/null; then
+    CLIP_CMD="xsel --clipboard --input"
+else
+    CLIP_CMD=""
+fi
+
+# Main loop to allow refresh
+REFRESH_MARKER="/tmp/pr-select-refresh-$$"
+trap "rm -f $REFRESH_MARKER" EXIT
+
+while true; do
+    # Fetch PRs as JSON
+    PR_JSON=$("$SCRIPT_DIR/team-open-prs" --format json "$@")
+
+    if [[ -z "$PR_JSON" ]] || [[ "$PR_JSON" == "[]" ]]; then
+        echo "No PRs found"
+        exit 0
+    fi
+
+    # Save JSON to temp file for preview lookups
+    PR_JSON_FILE=$(mktemp)
+    echo "$PR_JSON" > "$PR_JSON_FILE"
+    trap "rm -f $PR_JSON_FILE" EXIT
+
+    # Apply filters
+    FILTERED_JSON="$PR_JSON"
+    if [[ -n "$FILTER_STATUS" ]]; then
+        case "$FILTER_STATUS" in
+            "draft")
+                FILTERED_JSON=$(echo "$FILTERED_JSON" | jq '[.[] | select(.isDraft == true)]')
+                ;;
+            "approved")
+                FILTERED_JSON=$(echo "$FILTERED_JSON" | jq '[.[] | select([.reviews[].state] | any(. == "APPROVED"))]')
+                ;;
+            "review")
+                FILTERED_JSON=$(echo "$FILTERED_JSON" | jq '[.[] | select(.isDraft == false and ([.reviews[].state] | any(. == "APPROVED") | not))]')
+                ;;
+        esac
+    fi
+
+    if [[ -n "$FILTER_REPO" ]]; then
+        FILTERED_JSON=$(echo "$FILTERED_JSON" | jq --arg repo "$FILTER_REPO" '[.[] | select(.repo == $repo)]')
+    fi
+
+    # Apply sorting
+    case "$SORT_BY" in
+        "date")
+            if [[ "$SORT_ORDER" == "asc" ]]; then
+                SORTED_JSON=$(echo "$FILTERED_JSON" | jq 'sort_by(.createdAt)')
+            else
+                SORTED_JSON=$(echo "$FILTERED_JSON" | jq 'sort_by(.createdAt) | reverse')
+            fi
+            ;;
+        "author")
+            if [[ "$SORT_ORDER" == "asc" ]]; then
+                SORTED_JSON=$(echo "$FILTERED_JSON" | jq 'sort_by(.author.login)')
+            else
+                SORTED_JSON=$(echo "$FILTERED_JSON" | jq 'sort_by(.author.login) | reverse')
+            fi
+            ;;
+        "status")
+            # Draft=0, Review=1, Approved=2
+            SORTED_JSON=$(echo "$FILTERED_JSON" | jq '[.[] | . + {
+                statusOrder: (if .isDraft then 0 elif ([.reviews[].state] | any(. == "APPROVED")) then 2 else 1 end)
+            }] | sort_by(.statusOrder)')
+            if [[ "$SORT_ORDER" == "desc" ]]; then
+                SORTED_JSON=$(echo "$SORTED_JSON" | jq 'reverse')
+            fi
+            ;;
+        "comments")
+            if [[ "$SORT_ORDER" == "asc" ]]; then
+                SORTED_JSON=$(echo "$FILTERED_JSON" | jq 'sort_by(.comments | length)')
+            else
+                SORTED_JSON=$(echo "$FILTERED_JSON" | jq 'sort_by(.comments | length) | reverse')
+            fi
+            ;;
+        "repo")
+            if [[ "$SORT_ORDER" == "asc" ]]; then
+                SORTED_JSON=$(echo "$FILTERED_JSON" | jq 'sort_by(.repo)')
+            else
+                SORTED_JSON=$(echo "$FILTERED_JSON" | jq 'sort_by(.repo) | reverse')
+            fi
+            ;;
+        *)
+            SORTED_JSON="$FILTERED_JSON"
+            ;;
+    esac
+
+    # Format PRs for fzf display with colors and aligned columns
+    # Colors: Gray (date), Blue (author), Yellow (jira), Green (repo), White (title), Status (Draft/Review/Approved)
+    # Keep data separated by │ for parsing, but pad for alignment
+    # Include PR number and URLs for lookup (hidden from display)
+    PR_DISPLAY=$(echo "$SORTED_JSON" | jq -r '.[] |
+        (.jiraTicket // "" | .[0:15]) as $jira |
+        (
+            if .isDraft then "\u001b[34mDraft\u001b[0m   "
+            elif ([.reviews[].state] | any(. == "APPROVED")) then "\u001b[32mApproved\u001b[0m"
+            else "\u001b[33mReview\u001b[0m  "
+            end
+        ) as $status |
+        "\u001b[90m\(.createdAt[:10])\u001b[0m│" +
+        "\u001b[34m\(.author.login + (" " * (20 - (.author.login | length))))\u001b[0m│" +
+        "\u001b[33m" + ($jira + (" " * (15 - ($jira | length)))) + "\u001b[0m│" +
+        "\u001b[32m\(.repo + (" " * (18 - (.repo | length))))\u001b[0m│" +
+        $status + "│" +
+        "\(.title) " +
+        "│\(.number)│\(.url)│\(.jiraUrl // "")"')
+
+    # Get unique repos for filter menu
+    REPOS=($(echo "$PR_JSON" | jq -r '[.[].repo] | unique | .[]'))
+
+    # Build header with current sort/filter
+    HEADER="Sort: $SORT_BY ($SORT_ORDER) | Filter: status=${FILTER_STATUS:-all} repo=${FILTER_REPO:-all}"
+    HEADER="$HEADER | Ctrl-S: Sort | Ctrl-F: Filter | Ctrl-R: Refresh | Ctrl-X: Cache"
+
+    # Select PR with fzf with detailed preview
+    SELECTED=$(echo "$PR_DISPLAY" | FZF_PR_JSON="$PR_JSON_FILE" SORT_MARKER="/tmp/pr-select-sort-$$" FILTER_MARKER="/tmp/pr-select-filter-$$" fzf \
+        --ansi \
+        --header="$HEADER" \
+        --delimiter="│" \
+        --with-nth=1,2,3,4,5,6 \
+        --bind="ctrl-r:execute-silent(rm -rf $CACHE_DIR/* && touch $REFRESH_MARKER)+abort" \
+        --bind="ctrl-x:execute($SCRIPT_DIR/.pr-cache-menu)" \
+        --bind="ctrl-s:execute(bash -c \"$SCRIPT_DIR/.pr-sort-menu $SORT_BY $SORT_ORDER > $SORT_MARKER\")+abort" \
+        --bind="ctrl-f:execute(bash -c \"$SCRIPT_DIR/.pr-filter-menu '$FILTER_STATUS' '$FILTER_REPO' ${REPOS[*]} > $FILTER_MARKER\")+abort" \
+        --preview='
+            PR_NUM=$(echo {} | cut -d"│" -f7)
+            jq -r ".[] | select(.number == ($PR_NUM)) |
+                . as \$pr |
+                \"\u001b[1;97mTitle:\u001b[0m \" + .title + \"\\n\" +
+                \"\u001b[34mAuthor:\u001b[0m \" + .author.login + \"\\n\" +
+                (if .jiraTicket then (\"\u001b[33mJira:\u001b[0m \" + .jiraTicket + \"\\n\") else \"\" end) +
+                \"\u001b[32mState:\u001b[0m \" + (
+                    if .state == \"OPEN\" then
+                        (if .isDraft then \"\u001b[33mDRAFT\u001b[0m\" else \"\u001b[32mOPEN\u001b[0m\" end)
+                    elif .state == \"CLOSED\" then \"\u001b[31mCLOSED\u001b[0m\"
+                    elif .state == \"MERGED\" then \"\u001b[35mMERGED\u001b[0m\"
+                    else .state
+                    end
+                ) + \"\\n\" +
+                \"\u001b[90mUpdated:\u001b[0m \" + .updatedAt + \"\\n\" +
+                \"\u001b[36mComments:\u001b[0m \" + (.comments | length | tostring) + \"\\n\" +
+                \"\u001b[32mApproved:\u001b[0m \" + (if ([.reviews[].state] | any(. == \"APPROVED\")) then \"\u001b[32mYes\u001b[0m\" else \"\u001b[31mNo\u001b[0m\" end) + \"\\n\" +
+                \"\u001b[35mReviews by:\u001b[0m \" + (if (.reviews | length) > 0 then ([.reviews[].author.login] | unique | map(select(. != \$pr.author.login)) | join(\", \")) else \"None\" end) + \"\\n\" +
+                \"\\n\u001b[1mDescription:\u001b[0m\\n\" +
+                (if .body then (.body | split(\"\\n\") | .[0:50] | join(\"\\n\")) else \"No description\" end)
+            " < "$FZF_PR_JSON"
+        ' \
+        --preview-window=up:60%:wrap)
+
+    FZF_EXIT_CODE=$?
+    rm -f "$PR_JSON_FILE"
+
+    SORT_MARKER="/tmp/pr-select-sort-$$"
+    FILTER_MARKER="/tmp/pr-select-filter-$$"
+
+    # Check if user changed sort
+    if [[ -f "$SORT_MARKER" ]]; then
+        SORT_RESULT=$(cat "$SORT_MARKER")
+        rm -f "$SORT_MARKER"
+        if [[ "$SORT_RESULT" != "cancel" ]] && [[ -n "$SORT_RESULT" ]]; then
+            SORT_BY="${SORT_RESULT%:*}"
+            SORT_ORDER="${SORT_RESULT#*:}"
+        fi
+        continue
+    fi
+
+    # Check if user changed filter
+    if [[ -f "$FILTER_MARKER" ]]; then
+        FILTER_RESULT=$(cat "$FILTER_MARKER")
+        rm -f "$FILTER_MARKER"
+        if [[ "$FILTER_RESULT" == "clear" ]]; then
+            FILTER_STATUS=""
+            FILTER_REPO=""
+        elif [[ "$FILTER_RESULT" != "cancel" ]] && [[ -n "$FILTER_RESULT" ]]; then
+            FILTER_TYPE="${FILTER_RESULT%:*}"
+            FILTER_VALUE="${FILTER_RESULT#*:}"
+            if [[ "$FILTER_TYPE" == "status" ]]; then
+                FILTER_STATUS="$FILTER_VALUE"
+            elif [[ "$FILTER_TYPE" == "repo" ]]; then
+                FILTER_REPO="$FILTER_VALUE"
+            fi
+        fi
+        continue
+    fi
+
+    # Check if user pressed Ctrl-R (marker file exists)
+    if [[ -f "$REFRESH_MARKER" ]]; then
+        rm -f "$REFRESH_MARKER"
+        echo "Refreshing..."
+        continue
+    fi
+
+    # Exit loop if no selection (ESC or Ctrl-C)
+    if [[ -z "$SELECTED" ]]; then
+        exit 0
+    fi
+
+    # Break out of loop to process selection
+    break
+done
+
+# Extract PR details (strip ANSI color codes)
+SELECTED_CLEAN=$(echo "$SELECTED" | sed 's/\x1b\[[0-9;]*m//g')
+PR_DATE=$(echo "$SELECTED_CLEAN" | cut -d'│' -f1 | xargs)
+PR_AUTHOR=$(echo "$SELECTED_CLEAN" | cut -d'│' -f2 | xargs)
+PR_JIRA=$(echo "$SELECTED_CLEAN" | cut -d'│' -f3 | xargs)
+PR_REPO=$(echo "$SELECTED_CLEAN" | cut -d'│' -f4 | xargs)
+PR_APPROVED=$(echo "$SELECTED_CLEAN" | cut -d'│' -f5 | xargs)
+PR_TITLE=$(echo "$SELECTED_CLEAN" | cut -d'│' -f6 | xargs)
+PR_NUMBER=$(echo "$SELECTED_CLEAN" | cut -d'│' -f7 | xargs)
+PR_URL=$(echo "$SELECTED_CLEAN" | cut -d'│' -f8 | xargs)
+PR_JIRA_URL=$(echo "$SELECTED_CLEAN" | cut -d'│' -f9 | xargs)
+
+# Build action menu dynamically based on whether Jira exists
+if [[ -n "$PR_JIRA_URL" ]]; then
+    ACTION=$(printf "Open PR in browser\nOpen Jira in browser\nCopy PR URL\nCopy Jira URL\nCopy title\nCancel" | fzf \
+        --header="What would you like to do?" \
+        --height=10)
+else
+    ACTION=$(printf "Open PR in browser\nCopy PR URL\nCopy title\nCancel" | fzf \
+        --header="What would you like to do?" \
+        --height=8)
+fi
+
+case "$ACTION" in
+    "Open PR in browser")
+        if command -v open &> /dev/null; then
+            open "$PR_URL"
+        elif command -v xdg-open &> /dev/null; then
+            xdg-open "$PR_URL"
+        else
+            echo "Error: Cannot open browser" >&2
+            exit 1
+        fi
+        echo "Opened $PR_URL"
+        ;;
+    "Open Jira in browser")
+        if command -v open &> /dev/null; then
+            open "$PR_JIRA_URL"
+        elif command -v xdg-open &> /dev/null; then
+            xdg-open "$PR_JIRA_URL"
+        else
+            echo "Error: Cannot open browser" >&2
+            exit 1
+        fi
+        echo "Opened $PR_JIRA_URL"
+        ;;
+    "Copy PR URL")
+        if [[ -z "$CLIP_CMD" ]]; then
+            echo "Error: No clipboard command available" >&2
+            exit 1
+        fi
+        echo -n "$PR_URL" | eval "$CLIP_CMD"
+        echo "Copied PR URL to clipboard: $PR_URL"
+        ;;
+    "Copy Jira URL")
+        if [[ -z "$CLIP_CMD" ]]; then
+            echo "Error: No clipboard command available" >&2
+            exit 1
+        fi
+        echo -n "$PR_JIRA_URL" | eval "$CLIP_CMD"
+        echo "Copied Jira URL to clipboard: $PR_JIRA_URL"
+        ;;
+    "Copy title")
+        if [[ -z "$CLIP_CMD" ]]; then
+            echo "Error: No clipboard command available" >&2
+            exit 1
+        fi
+        echo -n "$PR_TITLE" | eval "$CLIP_CMD"
+        echo "Copied title to clipboard: $PR_TITLE"
+        ;;
+    "Cancel"|"")
+        echo "Cancelled"
+        exit 0
+        ;;
+esac

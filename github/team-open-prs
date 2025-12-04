@@ -1,0 +1,166 @@
+#!/bin/bash
+
+# Get open PRs from team contributors in active repos
+# Usage: team-open-prs [--format markdown|json] [--age days] [--user username] [--no-cache] [--cache-ttl seconds] [repos...]
+#   --format: output format (default: markdown)
+#   --age: number of days to look back (default: 30)
+#   --user: GitHub username to filter by (can be specified multiple times, defaults to contributors YAML)
+#   --no-cache: bypass cache and fetch fresh data
+#   --cache-ttl: cache lifetime in seconds (default: 300 = 5 minutes)
+#   repos: space-separated list of repos in format "org/repo" (default: reads from active repos)
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FORMAT="markdown"
+DAYS_BACK=30
+USERS=()
+USE_CACHE=true
+CACHE_TTL=300  # 5 minutes
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --format)
+            FORMAT="$2"
+            shift 2
+            ;;
+        --format=*)
+            FORMAT="${1#*=}"
+            shift
+            ;;
+        --age)
+            DAYS_BACK="$2"
+            shift 2
+            ;;
+        --age=*)
+            DAYS_BACK="${1#*=}"
+            shift
+            ;;
+        --user)
+            USERS+=("$2")
+            shift 2
+            ;;
+        --user=*)
+            USERS+=("${1#*=}")
+            shift
+            ;;
+        --no-cache)
+            USE_CACHE=false
+            shift
+            ;;
+        --cache-ttl)
+            CACHE_TTL="$2"
+            shift 2
+            ;;
+        --cache-ttl=*)
+            CACHE_TTL="${1#*=}"
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+# Remaining arguments are repos
+if [[ $# -eq 0 ]]; then
+    REPOS=("zendesk/billing" "zendesk/growth-engine" "zendesk/kennel")
+else
+    REPOS=("$@")
+fi
+
+# Validate format
+if [[ "$FORMAT" != "markdown" && "$FORMAT" != "json" ]]; then
+    echo "Error: Invalid format '$FORMAT'. Must be 'markdown' or 'json'." >&2
+    exit 1
+fi
+
+# Calculate date for PR search
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    DATE_FILTER=$(date -u -v-${DAYS_BACK}d +"%Y-%m-%d")
+else
+    DATE_FILTER=$(date -u -d "${DAYS_BACK} days ago" +"%Y-%m-%d")
+fi
+
+# Determine which users to filter by
+if [[ ${#USERS[@]} -eq 0 ]]; then
+    # Fall back to contributors file if --user not specified
+    CONTRIBUTORS_FILE="$SCRIPT_DIR/growth-engine-contributors.yml"
+    if [[ ! -f "$CONTRIBUTORS_FILE" ]]; then
+        echo "Error: Contributors file not found at $CONTRIBUTORS_FILE" >&2
+        exit 1
+    fi
+    # Extract contributors from YAML (simple grep-based approach)
+    CONTRIBUTORS=$(grep -E '^\s*-\s+' "$CONTRIBUTORS_FILE" | sed 's/^[[:space:]]*-[[:space:]]*//')
+else
+    # Use users from command line
+    CONTRIBUTORS=$(printf "%s\n" "${USERS[@]}")
+fi
+
+# Build jq filter for contributors
+JQ_FILTER=$(echo "$CONTRIBUTORS" | while read -r user; do
+    echo ".author.login == \"$user\""
+done | paste -sd '|' - | sed 's/|/ or /g')
+
+# Setup cache
+CACHE_DIR="${HOME}/.cache/gh-pr-cache"
+mkdir -p "$CACHE_DIR"
+
+# Generate cache key from parameters
+CACHE_KEY_DATA="${FORMAT}|${DATE_FILTER}|${CONTRIBUTORS}|${REPOS[*]}"
+CACHE_KEY=$(echo -n "$CACHE_KEY_DATA" | md5sum 2>/dev/null | cut -d' ' -f1 || echo -n "$CACHE_KEY_DATA" | md5 | cut -d' ' -f1)
+CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.cache"
+
+# Check cache if enabled
+if [[ "$USE_CACHE" == "true" ]] && [[ -f "$CACHE_FILE" ]]; then
+    # Check if cache is still fresh
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        CACHE_AGE=$(($(date +%s) - $(stat -f %m "$CACHE_FILE")))
+    else
+        CACHE_AGE=$(($(date +%s) - $(stat -c %Y "$CACHE_FILE")))
+    fi
+
+    if [[ $CACHE_AGE -lt $CACHE_TTL ]]; then
+        # Cache is fresh, use it
+        cat "$CACHE_FILE"
+        exit 0
+    fi
+fi
+
+# Fetch PRs based on format and cache the result
+if [[ "$FORMAT" == "json" ]]; then
+    # First get basic PR list
+    PR_LIST=$(mktemp)
+    for REPO in "${REPOS[@]}"; do
+        REPO_SHORT="${REPO#*/}"
+        gh pr list --repo "$REPO" --state open --search "created:>=$DATE_FILTER" \
+            --json author,createdAt,title,number,url,isDraft,labels 2>/dev/null | \
+            jq -c ".[] | select($JQ_FILTER) | . + {repo: \"$REPO_SHORT\", fullRepo: \"$REPO\"}" >> "$PR_LIST"
+    done
+
+    # Fetch full details for each PR
+    {
+        while IFS= read -r pr; do
+            PR_URL=$(echo "$pr" | jq -r '.url')
+            # Get full PR details and merge with list data, extract Jira ticket
+            gh pr view "$PR_URL" --json state,updatedAt,comments,body,reviews 2>/dev/null | \
+                jq -c ". + $(echo "$pr") |
+                    .jiraTicket = (if .body then ((.body | match(\"https://zendesk\\\\.atlassian\\\\.net/browse/(?<ticket>[A-Z]+-[0-9]+)\") | .captures[0].string) // null) else null end) |
+                    .jiraUrl = (if .jiraTicket then \"https://zendesk.atlassian.net/browse/\" + .jiraTicket else null end)"
+        done < "$PR_LIST"
+    } | jq -s '.' | tee "$CACHE_FILE"
+
+    rm -f "$PR_LIST"
+else
+    # Markdown table format
+    {
+        printf "REPO | DATE | AUTHOR | TITLE | LINK\n"
+        printf "%s\n" "--- | --- | --- | --- | ---"
+
+        for REPO in "${REPOS[@]}"; do
+            REPO_SHORT="${REPO#*/}"
+            gh pr list --repo "$REPO" --state open --search "created:>=$DATE_FILTER" \
+                --json author,createdAt,title,number,url 2>/dev/null | \
+                jq -r ".[] | select($JQ_FILTER) | [\"$REPO_SHORT\", .createdAt[:10], .author.login, .title, .url] | join(\" | \")"
+        done
+    } | tee "$CACHE_FILE"
+fi

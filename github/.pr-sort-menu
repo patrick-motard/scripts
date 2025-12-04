@@ -1,0 +1,45 @@
+#!/bin/bash
+# Helper script for sort options menu
+
+CURRENT_SORT="$1"
+CURRENT_ORDER="$2"
+
+action=$(printf "Sort by date (newest first)\nSort by date (oldest first)\nSort by author (A-Z)\nSort by author (Z-A)\nSort by status (Draft→Review→Approved)\nSort by status (Approved→Review→Draft)\nSort by comments (most first)\nSort by comments (least first)\nSort by repo (A-Z)\nSort by repo (Z-A)\nCancel" | fzf \
+    --header="Current: $CURRENT_SORT $CURRENT_ORDER | Select sort option" \
+    --height=15)
+
+case "$action" in
+    "Sort by date (newest first)")
+        echo "date:desc"
+        ;;
+    "Sort by date (oldest first)")
+        echo "date:asc"
+        ;;
+    "Sort by author (A-Z)")
+        echo "author:asc"
+        ;;
+    "Sort by author (Z-A)")
+        echo "author:desc"
+        ;;
+    "Sort by status (Draft→Review→Approved)")
+        echo "status:asc"
+        ;;
+    "Sort by status (Approved→Review→Draft)")
+        echo "status:desc"
+        ;;
+    "Sort by comments (most first)")
+        echo "comments:desc"
+        ;;
+    "Sort by comments (least first)")
+        echo "comments:asc"
+        ;;
+    "Sort by repo (A-Z)")
+        echo "repo:asc"
+        ;;
+    "Sort by repo (Z-A)")
+        echo "repo:desc"
+        ;;
+    *)
+        echo "$CURRENT_SORT:$CURRENT_ORDER"
+        ;;
+esac

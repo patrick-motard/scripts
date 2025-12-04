@@ -1,0 +1,42 @@
+#!/bin/bash
+
+# Get repos the user has recently worked in
+# Usage: recent-repos [days] [limit]
+#   days: number of days to look back for commits (default: 365)
+#   limit: max number of personal repos to show (default: 20)
+
+DAYS_BACK=${1:-365}
+LIMIT=${2:-20}
+
+# Calculate date for commit search
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    DATE_FILTER=$(date -u -v-${DAYS_BACK}d +"%Y-%m-%d")
+else
+    DATE_FILTER=$(date -u -d "${DAYS_BACK} days ago" +"%Y-%m-%d")
+fi
+
+# Get authenticated user
+USERNAME=$(gh api user --jq '.login')
+
+echo "Recent repos for $USERNAME"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo
+
+# Show personal repos by recent push
+echo "Personal repos (by recent push):"
+gh repo list --json name,pushedAt,url --limit 50 | \
+    jq -r "sort_by(.pushedAt) | reverse | .[:$LIMIT] | .[] | \"\(.name)\t\(.pushedAt)\""
+echo
+
+# Get organizations
+ORGS=$(gh api user/orgs --jq '.[].login')
+
+# For each org, find repos where user has committed
+for ORG in $ORGS; do
+    echo "${ORG} repos (with your commits since ${DATE_FILTER}):"
+
+    gh api "search/commits?q=org:${ORG}+author:${USERNAME}+committer-date:>${DATE_FILTER}&sort=committer-date&order=desc&per_page=100" \
+        --jq '.items | group_by(.repository.name) | map({repo: .[0].repository.name, url: .[0].repository.html_url, last_commit: .[0].commit.committer.date}) | sort_by(.last_commit) | reverse | .[] | "\(.repo)\t\(.last_commit)"' 2>/dev/null
+
+    echo
+done

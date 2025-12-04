@@ -1,0 +1,46 @@
+#!/bin/bash
+# Helper script for cache management menu
+
+CACHE_DIR="${HOME}/.cache/gh-pr-cache"
+
+if [[ ! -d "$CACHE_DIR" ]]; then
+    echo "No cache directory found"
+    sleep 2
+    exit 0
+fi
+
+cache_count=$(find "$CACHE_DIR" -name "*.cache" 2>/dev/null | wc -l | xargs)
+cache_size=$(du -sh "$CACHE_DIR" 2>/dev/null | cut -f1)
+
+action=$(printf "Clear all cache ($cache_count entries, $cache_size)\nClear cache older than 1 hour\nClear cache older than 1 day\nView cache stats\nCancel" | fzf \
+    --header="Cache Management" \
+    --height=10)
+
+case "$action" in
+    "Clear all cache"*)
+        rm -rf "$CACHE_DIR"/*
+        echo "✓ Cache cleared!"
+        sleep 1
+        ;;
+    "Clear cache older than 1 hour")
+        find "$CACHE_DIR" -name "*.cache" -mmin +60 -delete 2>/dev/null
+        echo "✓ Cleared cache older than 1 hour"
+        sleep 1
+        ;;
+    "Clear cache older than 1 day")
+        find "$CACHE_DIR" -name "*.cache" -mtime +1 -delete 2>/dev/null
+        echo "✓ Cleared cache older than 1 day"
+        sleep 1
+        ;;
+    "View cache stats")
+        echo "Cache Statistics:"
+        echo "  Location: $CACHE_DIR"
+        echo "  Entries: $cache_count"
+        echo "  Size: $cache_size"
+        echo ""
+        echo "Recent entries:"
+        find "$CACHE_DIR" -name "*.cache" -exec ls -lht {} + 2>/dev/null | head -5
+        echo ""
+        read -p "Press enter to continue..."
+        ;;
+esac
