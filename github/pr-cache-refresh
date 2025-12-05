@@ -1,0 +1,48 @@
+#!/bin/bash
+
+# Background cache refresher for pr-select
+# Runs team-open-prs to keep cache warm
+# Usage: pr-cache-refresh [interval_seconds]
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INTERVAL="${1:-600}"  # Default 10 minutes
+PID_FILE="/tmp/pr-cache-refresh.pid"
+STATUS_FILE="/tmp/pr-cache-status"
+
+# Check if another instance is already running
+if [[ -f "$PID_FILE" ]]; then
+    OLD_PID=$(cat "$PID_FILE")
+    # Check if process is still running
+    if ps -p "$OLD_PID" > /dev/null 2>&1; then
+        # Already running, exit silently
+        exit 0
+    fi
+fi
+
+# Write our PID to file
+echo $$ > "$PID_FILE"
+
+# Clean up PID file on exit
+trap "rm -f $PID_FILE $STATUS_FILE" EXIT
+
+# Function to update status file for tmux status bar
+notify() {
+    local message="$1"
+    local timestamp=$(date +"%H:%M")
+    echo "${timestamp} ${message}" > "$STATUS_FILE"
+}
+
+# Run once immediately on start
+if "$SCRIPT_DIR/team-open-prs" --format json --age 7 > /dev/null 2>&1; then
+    notify "✓ PR cache initialized"
+fi
+
+# Then loop with interval
+while true; do
+    sleep "$INTERVAL"
+    if "$SCRIPT_DIR/team-open-prs" --format json --age 7 > /dev/null 2>&1; then
+        notify "✓ PR cache refreshed"
+    else
+        notify "✗ PR cache refresh failed"
+    fi
+done
