@@ -2,28 +2,62 @@
 
 # Background cache refresher for pr-select
 # Runs team-open-prs to keep cache warm
-# Usage: pr-cache-refresh [interval_seconds]
+# Usage: pr-cache-refresh [interval_seconds] [--force]
+#   --force: Kill existing process if running
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INTERVAL="${1:-600}"  # Default 10 minutes
+LOG_FILE="/tmp/pr-cache-refresh.log"
+
+# Logging function (early definition for use in startup)
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"
+}
+
+# Parse arguments
+FORCE=0
+INTERVAL=600  # Default 10 minutes
+for arg in "$@"; do
+    case $arg in
+        --force)
+            FORCE=1
+            shift
+            ;;
+        *)
+            if [[ "$arg" =~ ^[0-9]+$ ]]; then
+                INTERVAL="$arg"
+            fi
+            ;;
+    esac
+done
+
 PID_FILE="/tmp/pr-cache-refresh.pid"
 STATUS_FILE="/tmp/pr-cache-status"
+PR_COUNT_FILE="/tmp/pr-cache-count"
 
 # Check if another instance is already running
 if [[ -f "$PID_FILE" ]]; then
     OLD_PID=$(cat "$PID_FILE")
     # Check if process is still running
     if ps -p "$OLD_PID" > /dev/null 2>&1; then
-        # Already running, exit silently
-        exit 0
+        if [[ $FORCE -eq 1 ]]; then
+            log "Found existing process (PID: $OLD_PID), killing due to --force flag"
+            kill "$OLD_PID" 2>/dev/null
+            sleep 1
+        else
+            log "Another instance is already running (PID: $OLD_PID), exiting"
+            exit 0
+        fi
+    else
+        log "Stale PID file found (PID: $OLD_PID no longer running), removing"
+        rm -f "$PID_FILE"
     fi
 fi
 
 # Write our PID to file
 echo $$ > "$PID_FILE"
 
-# Clean up PID file on exit
-trap "rm -f $PID_FILE $STATUS_FILE" EXIT
+# Clean up files on exit (keep log for debugging)
+trap "rm -f $PID_FILE $STATUS_FILE $PR_COUNT_FILE" EXIT
 
 # Function to update status file for tmux status bar
 notify() {
@@ -32,17 +66,64 @@ notify() {
     echo "${timestamp} ${message}" > "$STATUS_FILE"
 }
 
+# Function to show tmux popup notification
+show_popup() {
+    local message="$1"
+    local duration="${2:-3}"  # Default 3 seconds
+
+    # Find all tmux clients and display popup in each
+    tmux list-clients -F "#{client_name}" 2>/dev/null | while read -r client; do
+        tmux display-popup -c "$client" -E -w 50% -h 20% -x C -y C \
+            -T " GitHub PR Updates " \
+            "echo -e '$message' && sleep $duration" 2>/dev/null || true
+    done
+}
+
 # Run once immediately on start
+log "Script started with interval: ${INTERVAL}s"
+log "Running initial PR fetch..."
 if "$SCRIPT_DIR/team-open-prs" --format json --age 7 > /dev/null 2>&1; then
     notify "✓ PR cache initialized"
+    # Store initial count
+    INITIAL_COUNT=$("$SCRIPT_DIR/team-open-prs" --format json --age 7 2>/dev/null | jq '. | length' 2>/dev/null || echo "0")
+    echo "$INITIAL_COUNT" > "$PR_COUNT_FILE"
+    log "Initial PR count: $INITIAL_COUNT"
+else
+    log "ERROR: Initial PR fetch failed"
 fi
 
 # Then loop with interval
 while true; do
+    log "Sleeping for ${INTERVAL}s..."
     sleep "$INTERVAL"
+
+    log "Waking up to refresh PR cache..."
+    # Get previous count
+    OLD_COUNT=$(cat "$PR_COUNT_FILE" 2>/dev/null || echo "0")
+    log "Previous PR count: $OLD_COUNT"
+
     if "$SCRIPT_DIR/team-open-prs" --format json --age 7 > /dev/null 2>&1; then
+        # Get new count
+        NEW_COUNT=$("$SCRIPT_DIR/team-open-prs" --format json --age 7 2>/dev/null | jq '. | length' 2>/dev/null || echo "0")
+        echo "$NEW_COUNT" > "$PR_COUNT_FILE"
+        log "New PR count: $NEW_COUNT"
+
         notify "✓ PR cache refreshed"
+
+        # Check if count changed
+        if [[ "$NEW_COUNT" -gt "$OLD_COUNT" ]]; then
+            DIFF=$((NEW_COUNT - OLD_COUNT))
+            log "CHANGE DETECTED: $DIFF new PRs (showing popup)"
+            show_popup "New PRs detected!\n\n$DIFF new pull request(s)\nTotal: $NEW_COUNT PRs\n\nPress Alt-g to view" 5
+        elif [[ "$NEW_COUNT" -lt "$OLD_COUNT" ]]; then
+            DIFF=$((OLD_COUNT - NEW_COUNT))
+            log "CHANGE DETECTED: $DIFF PRs closed/merged (showing popup)"
+            show_popup "PR updates\n\n$DIFF PR(s) closed/merged\nTotal: $NEW_COUNT PRs" 3
+        else
+            log "No change in PR count"
+        fi
     else
+        log "ERROR: PR cache refresh failed"
         notify "✗ PR cache refresh failed"
     fi
 done
