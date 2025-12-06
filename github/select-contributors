@@ -1,0 +1,123 @@
+#!/bin/bash
+
+# Interactive contributor selector for PR watching
+# Usage: select-contributors
+#
+# Fetches contributors from watched repos and lets you select which ones to follow.
+# Saves selected contributors to ~/.config/gh-pr-select/contributors.txt
+
+CONFIG_DIR="${HOME}/.config/gh-pr-select"
+CONFIG_FILE="${CONFIG_DIR}/contributors.txt"
+REPOS_FILE="${CONFIG_DIR}/repos.txt"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Check for required commands
+if ! command -v fzf &> /dev/null; then
+    echo "Error: fzf is not installed" >&2
+    exit 1
+fi
+
+if ! command -v gh &> /dev/null; then
+    echo "Error: gh is not installed" >&2
+    exit 1
+fi
+
+# Check if repos are configured
+if [[ ! -f "$REPOS_FILE" ]] || [[ ! -s "$REPOS_FILE" ]]; then
+    echo "No repos configured. Run 'select-repos' first." >&2
+    exit 1
+fi
+
+# Read repos
+REPOS=()
+while IFS= read -r line; do
+    [[ -n "$line" ]] && REPOS+=("$line")
+done < "$REPOS_FILE"
+
+if [[ ${#REPOS[@]} -eq 0 ]]; then
+    echo "No repos configured. Run 'select-repos' first." >&2
+    exit 1
+fi
+
+echo "Finding contributors from watched repos..." >&2
+
+# Collect contributors from all repos
+CONTRIBUTORS_LIST=$(mktemp)
+
+for repo in "${REPOS[@]}"; do
+    echo "Checking ${repo}..." >&2
+
+    # Check repo access first
+    REPO_CHECK=$(gh api "repos/${repo}" 2>&1)
+    if echo "$REPO_CHECK" | grep -qi "SAML enforcement\|OAuth token access\|Not Found"; then
+        echo "  Skipping ${repo} - not accessible" >&2
+        continue
+    fi
+
+    # Get contributors (people who have committed)
+    gh api "repos/${repo}/contributors" --paginate --jq '.[].login' 2>/dev/null | \
+        while read -r user; do
+            echo -e "${user}\t${repo}\tcontributor"
+        done >> "$CONTRIBUTORS_LIST"
+
+    # Also get recent PR authors
+    gh pr list --repo "$repo" --state all --limit 50 --json author 2>/dev/null | \
+        jq -r '.[].author.login' | sort -u | \
+        while read -r user; do
+            echo -e "${user}\t${repo}\tpr-author"
+        done >> "$CONTRIBUTORS_LIST"
+done
+
+# Check if we found any contributors
+if [[ ! -s "$CONTRIBUTORS_LIST" ]]; then
+    echo "No contributors found in watched repos" >&2
+    rm -f "$CONTRIBUTORS_LIST"
+    exit 1
+fi
+
+# Deduplicate and count repos per user
+FORMATTED=$(sort "$CONTRIBUTORS_LIST" | \
+    awk -F'\t' '{
+        users[$1]++
+        if (!seen[$1,$2]++) repos[$1] = repos[$1] ? repos[$1] "," $2 : $2
+    }
+    END {
+        for (u in users) printf "%-25s %s\n", u, repos[u]
+    }' | sort)
+
+rm -f "$CONTRIBUTORS_LIST"
+
+# Load existing selections
+EXISTING=""
+if [[ -f "$CONFIG_FILE" ]]; then
+    EXISTING=$(cat "$CONFIG_FILE" | tr '\n' '|' | sed 's/|$//')
+fi
+
+echo "" >&2
+echo "Select contributors to watch for PRs (TAB to select, ENTER to confirm):" >&2
+
+# Use fzf for multi-select
+SELECTED=$(echo "$FORMATTED" | fzf \
+    --multi \
+    --header="TAB: select | ENTER: confirm | ESC: cancel" \
+    --prompt="Select contributors > " \
+    --preview-window=hidden \
+    --bind="ctrl-a:select-all" \
+    --bind="ctrl-d:deselect-all")
+
+if [[ -z "$SELECTED" ]]; then
+    echo "No contributors selected, keeping existing config" >&2
+    exit 0
+fi
+
+# Extract just usernames (first column)
+SELECTED_USERS=$(echo "$SELECTED" | awk '{print $1}')
+
+# Save to config file
+mkdir -p "$CONFIG_DIR"
+echo "$SELECTED_USERS" > "$CONFIG_FILE"
+
+COUNT=$(echo "$SELECTED_USERS" | wc -l | xargs)
+echo "" >&2
+echo "Saved $COUNT contributors to $CONFIG_FILE" >&2
+echo "$SELECTED_USERS"

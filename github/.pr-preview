@@ -1,0 +1,158 @@
+#!/bin/bash
+
+# Preview script for pr-select - shows split view with changes on left, details on right
+
+PR_NUM="$1"
+PR_URL="$2"
+PR_JSON_FILE="$3"
+CHANGES_FILE="$4"
+
+# Get terminal width for the preview
+WIDTH="${FZF_PREVIEW_COLUMNS:-80}"
+LEFT_WIDTH=25
+RIGHT_WIDTH=$((WIDTH - LEFT_WIDTH - 3))
+
+# Generate left panel: Update summary
+generate_left() {
+    if [[ -f "$CHANGES_FILE" ]]; then
+        local is_mine=$(jq -r --arg url "$PR_URL" 'if .myPRs[$url] then "yes" else "no" end' < "$CHANGES_FILE" 2>/dev/null)
+        local has_change=$(jq -r --arg url "$PR_URL" 'if (.myPRs[$url] // .otherPRs[$url]) then "yes" else "no" end' < "$CHANGES_FILE" 2>/dev/null)
+
+        if [[ "$has_change" == "yes" ]]; then
+            echo -e "\033[1;43;30m UPDATES \033[0m"
+            echo "───────────────────"
+
+            if [[ "$is_mine" == "yes" ]]; then
+                echo -e "\033[1;35m▶ YOUR PR\033[0m"
+                echo ""
+                jq -r --arg url "$PR_URL" '
+                    .myPRs[$url] |
+                    (if .isNew then "● NEW PR" else empty end),
+                    (if .newComments then "● +\(.newComments) comment(s)" else empty end),
+                    (if .newReviews then "● +\(.newReviews) review(s)" else empty end),
+                    (if .approvalChanged then "● → \(.newApprovalStatus)" else empty end)
+                ' < "$CHANGES_FILE" 2>/dev/null
+            else
+                jq -r --arg url "$PR_URL" '
+                    .otherPRs[$url] |
+                    (if .isNew then "● NEW PR" else empty end),
+                    (if .newComments then "● +\(.newComments) comment(s)" else empty end),
+                    (if .newReviews then "● +\(.newReviews) review(s)" else empty end),
+                    (if .approvalChanged then "● → \(.newApprovalStatus)" else empty end)
+                ' < "$CHANGES_FILE" 2>/dev/null
+            fi
+            echo ""
+            echo "───────────────────"
+            echo ""
+            echo -e "\033[90mCtrl-X: mark seen\033[0m"
+        else
+            echo -e "\033[90m─ No Updates ─\033[0m"
+            echo ""
+            echo "No changes since"
+            echo "last check."
+        fi
+    else
+        echo -e "\033[90m─ No Data ─\033[0m"
+    fi
+
+    # Pad with empty lines to match right side
+    for i in {1..30}; do echo ""; done
+}
+
+# Generate right panel: PR details
+generate_right() {
+    jq -r ".[] | select(.number == $PR_NUM) |
+        \"\u001b[1;97m\" + .title + \"\u001b[0m\",
+        \"\",
+        \"\u001b[34mAuthor:\u001b[0m    \" + .author.login,
+        (if .jiraTicket then \"\u001b[33mJira:\u001b[0m      \" + .jiraTicket else empty end),
+        \"\u001b[32mState:\u001b[0m     \" + (
+            if .state == \"OPEN\" then
+                (if .isDraft then \"\u001b[33mDRAFT\u001b[0m\" else \"\u001b[32mOPEN\u001b[0m\" end)
+            elif .state == \"CLOSED\" then \"\u001b[31mCLOSED\u001b[0m\"
+            elif .state == \"MERGED\" then \"\u001b[35mMERGED\u001b[0m\"
+            else .state
+            end
+        ),
+        \"\u001b[90mUpdated:\u001b[0m   \" + .updatedAt[:10],
+        \"\u001b[36mComments:\u001b[0m  \" + (.comments | length | tostring),
+        \"\u001b[32mApproved:\u001b[0m  \" + (if ([.reviews[].state] | any(. == \"APPROVED\")) then \"\u001b[32mYes\u001b[0m\" else \"\u001b[31mNo\u001b[0m\" end),
+        \"\u001b[35mReviewers:\u001b[0m \" + (if (.reviews | length) > 0 then ([.reviews[].author.login] | unique | join(\", \")) else \"None\" end),
+        \"\",
+        \"───────────────────────────────────\",
+        \"\u001b[1mDescription:\u001b[0m\",
+        (if .body then (.body | split(\"\n\") | .[0:30] | .[]) else \"No description\" end)
+    " < "$PR_JSON_FILE" 2>/dev/null
+}
+
+# Wrap text to specified width, outputting multiple lines
+wrap_text() {
+    local text="$1"
+    local width="$2"
+    # Strip ANSI codes for wrapping calculation
+    local clean=$(echo -e "$text" | sed 's/\x1b\[[0-9;]*m//g')
+
+    if [[ ${#clean} -le $width ]]; then
+        echo "$text"
+    else
+        # Wrap the clean text and output each segment
+        echo "$clean" | fold -s -w "$width"
+    fi
+}
+
+# Combine left and right panels with proper wrapping
+combine_panels() {
+    local left_file="$1"
+    local right_file="$2"
+
+    # Read left lines into array
+    local -a left_lines=()
+    while IFS= read -r line; do
+        left_lines+=("$line")
+    done < "$left_file"
+
+    # Process right lines with wrapping, pair with left
+    local left_idx=0
+    local left_count=${#left_lines[@]}
+    local blank_left=$(printf "%*s" "$LEFT_WIDTH" "")
+
+    while IFS= read -r right_line; do
+        # Wrap this right line
+        while IFS= read -r wrapped; do
+            # Get left line or blank
+            if [[ $left_idx -lt $left_count ]]; then
+                local left_line="${left_lines[$left_idx]}"
+                # Pad left line
+                local clean=$(echo -e "$left_line" | sed 's/\x1b\[[0-9;]*m//g')
+                local len=${#clean}
+                local pad=$((LEFT_WIDTH - len))
+                [[ $pad -lt 0 ]] && pad=0
+                printf "%s%*s│%s\n" "$left_line" "$pad" "" "$wrapped"
+                ((left_idx++))
+            else
+                printf "%s│%s\n" "$blank_left" "$wrapped"
+            fi
+        done < <(wrap_text "$right_line" "$RIGHT_WIDTH")
+    done < "$right_file"
+
+    # Output remaining left lines with empty right
+    while [[ $left_idx -lt $left_count ]]; do
+        local left_line="${left_lines[$left_idx]}"
+        local clean=$(echo -e "$left_line" | sed 's/\x1b\[[0-9;]*m//g')
+        local len=${#clean}
+        local pad=$((LEFT_WIDTH - len))
+        [[ $pad -lt 0 ]] && pad=0
+        printf "%s%*s│\n" "$left_line" "$pad" ""
+        ((left_idx++))
+    done
+}
+
+# Create temporary files for each panel
+LEFT_TMP=$(mktemp)
+RIGHT_TMP=$(mktemp)
+trap "rm -f $LEFT_TMP $RIGHT_TMP" EXIT
+
+generate_left | head -40 > "$LEFT_TMP"
+generate_right | head -60 > "$RIGHT_TMP"
+
+combine_panels "$LEFT_TMP" "$RIGHT_TMP"
