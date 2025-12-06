@@ -1,26 +1,33 @@
 #!/bin/bash
 
 # Background cache refresher for pr-select
-# Runs team-open-prs to keep cache warm
-# Usage: pr-cache-refresh [interval_seconds] [--force]
+# Runs team-open-prs to keep cache warm and tracks PR activity changes
+# Usage: pr-cache-refresh [interval_seconds] [--force] [--verbose] [--reset]
 #   --force: Kill existing process if running
+#   --verbose, -v: Log to stdout in addition to log file
+#   --reset: Reset the baseline (mark all current activity as "seen")
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="/tmp/pr-cache-refresh.log"
-
-# Logging function (early definition for use in startup)
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"
-}
+CACHE_DIR="${HOME}/.cache/gh-pr-cache"
+BASELINE_FILE="${CACHE_DIR}/baseline.json"
+CHANGES_FILE="${CACHE_DIR}/changes.json"
 
 # Parse arguments
 FORCE=0
+VERBOSE=0
+RESET_ONLY=0
 INTERVAL=600  # Default 10 minutes
 for arg in "$@"; do
     case $arg in
         --force)
             FORCE=1
-            shift
+            ;;
+        --verbose|-v)
+            VERBOSE=1
+            ;;
+        --reset)
+            RESET_ONLY=1
             ;;
         *)
             if [[ "$arg" =~ ^[0-9]+$ ]]; then
@@ -30,9 +37,241 @@ for arg in "$@"; do
     esac
 done
 
+# Logging function (early definition for use in startup)
+log() {
+    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+    echo "$msg" >> "$LOG_FILE"
+    if [[ $VERBOSE -eq 1 ]]; then
+        echo "$msg"
+    fi
+}
+
+# Ensure cache directory exists
+mkdir -p "$CACHE_DIR"
+
+# Get current GitHub username (cached for the session)
+get_github_user() {
+    if [[ -z "$GITHUB_USER" ]]; then
+        GITHUB_USER=$(gh api user --jq '.login' 2>/dev/null || echo "")
+        log "Detected GitHub user: ${GITHUB_USER:-unknown}"
+    fi
+    echo "$GITHUB_USER"
+}
+
+# Compute approval status from reviews array
+# Returns: APPROVED, CHANGES_REQUESTED, or PENDING
+get_approval_status() {
+    local reviews_json="$1"
+
+    # Check for CHANGES_REQUESTED first (takes precedence)
+    local has_changes_requested=$(echo "$reviews_json" | jq '[.[].state] | any(. == "CHANGES_REQUESTED")')
+    if [[ "$has_changes_requested" == "true" ]]; then
+        echo "CHANGES_REQUESTED"
+        return
+    fi
+
+    # Check for APPROVED
+    local has_approved=$(echo "$reviews_json" | jq '[.[].state] | any(. == "APPROVED")')
+    if [[ "$has_approved" == "true" ]]; then
+        echo "APPROVED"
+        return
+    fi
+
+    echo "PENDING"
+}
+
+# Create baseline from current PR cache
+create_baseline() {
+    local pr_json="$1"
+    local user=$(get_github_user)
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    log "Creating baseline with $(echo "$pr_json" | jq 'length') PRs"
+
+    # Build baseline JSON
+    local baseline=$(echo "$pr_json" | jq --arg user "$user" --arg ts "$timestamp" '
+        {
+            timestamp: $ts,
+            user: $user,
+            prs: (reduce .[] as $pr ({};
+                .[$pr.url] = {
+                    commentCount: ($pr.comments | length),
+                    reviewCount: ($pr.reviews | length),
+                    reviews: ([$pr.reviews[] | "\(.author.login):\(.state)"] | sort),
+                    author: $pr.author.login,
+                    number: $pr.number,
+                    repo: $pr.repo,
+                    title: $pr.title
+                }
+            ))
+        }
+    ')
+
+    echo "$baseline" > "$BASELINE_FILE"
+    # Clear changes file on reset
+    echo '{"lastUpdated":"'"$timestamp"'","myPRs":{},"otherPRs":{}}' > "$CHANGES_FILE"
+    log "Baseline saved to $BASELINE_FILE"
+}
+
+# Detect changes between current PR state and baseline
+detect_changes() {
+    local pr_json="$1"
+    local user=$(get_github_user)
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    if [[ ! -f "$BASELINE_FILE" ]]; then
+        log "No baseline found, creating one"
+        create_baseline "$pr_json"
+        return 1  # No changes to report on first run
+    fi
+
+    local baseline=$(cat "$BASELINE_FILE")
+
+    # Compare each PR against baseline
+    local changes=$(echo "$pr_json" | jq --arg user "$user" --arg ts "$timestamp" --argjson baseline "$baseline" '
+        def getApprovalStatus(reviews):
+            if ([reviews[].state] | any(. == "CHANGES_REQUESTED")) then "CHANGES_REQUESTED"
+            elif ([reviews[].state] | any(. == "APPROVED")) then "APPROVED"
+            else "PENDING"
+            end;
+
+        def getBaselineApproval(reviews):
+            if ([reviews[] | split(":")[1]] | any(. == "CHANGES_REQUESTED")) then "CHANGES_REQUESTED"
+            elif ([reviews[] | split(":")[1]] | any(. == "APPROVED")) then "APPROVED"
+            else "PENDING"
+            end;
+
+        reduce .[] as $pr (
+            {lastUpdated: $ts, myPRs: {}, otherPRs: {}};
+
+            ($pr.url) as $url |
+            ($baseline.prs[$url] // null) as $base |
+
+            if $base == null then
+                # New PR since baseline
+                if $pr.author.login == $user then
+                    .myPRs[$url] = {
+                        isNew: true,
+                        number: $pr.number,
+                        repo: $pr.repo,
+                        title: $pr.title
+                    }
+                else
+                    .otherPRs[$url] = {
+                        isNew: true,
+                        number: $pr.number,
+                        repo: $pr.repo,
+                        title: $pr.title,
+                        author: $pr.author.login
+                    }
+                end
+            else
+                # Existing PR - check for changes
+                (($pr.comments | length) - $base.commentCount) as $newComments |
+                (($pr.reviews | length) - $base.reviewCount) as $newReviews |
+                (getApprovalStatus($pr.reviews)) as $currentApproval |
+                (getBaselineApproval($base.reviews)) as $baseApproval |
+                ($currentApproval != $baseApproval) as $approvalChanged |
+
+                if ($newComments > 0) or ($newReviews > 0) or $approvalChanged then
+                    {
+                        newComments: (if $newComments > 0 then $newComments else null end),
+                        newReviews: (if $newReviews > 0 then $newReviews else null end),
+                        approvalChanged: (if $approvalChanged then true else null end),
+                        newApprovalStatus: (if $approvalChanged then $currentApproval else null end),
+                        number: $pr.number,
+                        repo: $pr.repo,
+                        title: $pr.title
+                    } | with_entries(select(.value != null)) as $change |
+
+                    if $pr.author.login == $user then
+                        .myPRs[$url] = $change
+                    else
+                        .otherPRs[$url] = ($change + {author: $pr.author.login})
+                    end
+                else .
+                end
+            end
+        )
+    ')
+
+    echo "$changes" > "$CHANGES_FILE"
+
+    # Return whether there are any changes
+    local has_changes=$(echo "$changes" | jq '(.myPRs | length) > 0 or (.otherPRs | length) > 0')
+    if [[ "$has_changes" == "true" ]]; then
+        log "Changes detected, saved to $CHANGES_FILE"
+        echo "$changes"
+        return 0
+    else
+        log "No changes detected"
+        return 1
+    fi
+}
+
+# Format changes for popup display
+format_changes_popup() {
+    local changes="$1"
+
+    local my_prs=$(echo "$changes" | jq -r '
+        .myPRs | to_entries |
+        if length == 0 then empty
+        else
+            "YOUR PRs:",
+            (.[] |
+                "  #\(.value.number): " +
+                ([
+                    (if .value.isNew then "NEW" else empty end),
+                    (if .value.newComments then "\(.value.newComments) comment(s)" else empty end),
+                    (if .value.newReviews then "\(.value.newReviews) review(s)" else empty end),
+                    (if .value.approvalChanged then "\(.value.newApprovalStatus)" else empty end)
+                ] | join(", "))
+            )
+        end
+    ')
+
+    local other_prs=$(echo "$changes" | jq -r '
+        .otherPRs | to_entries |
+        if length == 0 then empty
+        else
+            "",
+            "OTHER PRs:",
+            (.[0:3][] |
+                "  #\(.value.number): " +
+                ([
+                    (if .value.isNew then "NEW" else empty end),
+                    (if .value.newComments then "\(.value.newComments) comment(s)" else empty end),
+                    (if .value.newReviews then "\(.value.newReviews) review(s)" else empty end),
+                    (if .value.approvalChanged then "\(.value.newApprovalStatus)" else empty end)
+                ] | join(", "))
+            ),
+            if length > 3 then "  +\(length - 3) more..." else empty end
+        end
+    ')
+
+    if [[ -n "$my_prs" ]] || [[ -n "$other_prs" ]]; then
+        echo -e "${my_prs}\n${other_prs}" | grep -v '^$' | head -10
+    fi
+}
+
 PID_FILE="/tmp/pr-cache-refresh.pid"
 STATUS_FILE="/tmp/pr-cache-status"
 PR_COUNT_FILE="/tmp/pr-cache-count"
+
+# Handle --reset flag
+if [[ $RESET_ONLY -eq 1 ]]; then
+    log "Reset requested"
+    # Fetch current PRs and create new baseline
+    PR_JSON=$("$SCRIPT_DIR/team-open-prs" --format json 2>/dev/null)
+    if [[ -n "$PR_JSON" ]] && [[ "$PR_JSON" != "[]" ]]; then
+        create_baseline "$PR_JSON"
+        echo "Baseline reset. All current PR activity marked as seen."
+    else
+        echo "No PRs found. Baseline cleared."
+        rm -f "$BASELINE_FILE" "$CHANGES_FILE"
+    fi
+    exit 0
+fi
 
 # Check if another instance is already running
 if [[ -f "$PID_FILE" ]]; then
@@ -66,28 +305,66 @@ notify() {
     echo "${timestamp} ${message}" > "$STATUS_FILE"
 }
 
-# Function to show tmux popup notification
+# Function to show tmux toast notification (non-blocking)
 show_popup() {
     local message="$1"
     local duration="${2:-3}"  # Default 3 seconds
+    local height="${3:-7}"    # Default height
 
-    # Find all tmux clients and display popup in each
+    # Find all tmux clients and display toast in each
+    # -P makes it passthrough (non-blocking, keyboard goes to pane)
+    # -E auto-closes when command exits
+    # Position: top right corner, small box
     tmux list-clients -F "#{client_name}" 2>/dev/null | while read -r client; do
-        tmux display-popup -c "$client" -E -w 50% -h 20% -x C -y C \
-            -T " GitHub PR Updates " \
-            "echo -e '$message' && sleep $duration" 2>/dev/null || true
+        tmux display-popup -c "$client" -P -E -w 40 -h "$height" -x R -y 0 \
+            -T " PR Updates " \
+            "echo -e '$message'; sleep $duration" 2>/dev/null || true
     done
 }
 
 # Run once immediately on start
 log "Script started with interval: ${INTERVAL}s"
 log "Running initial PR fetch..."
-if "$SCRIPT_DIR/team-open-prs" --format json --age 7 > /dev/null 2>&1; then
+
+# Get GitHub username early
+get_github_user > /dev/null
+
+if [[ $VERBOSE -eq 1 ]]; then
+    FETCH_OUTPUT=$("$SCRIPT_DIR/team-open-prs" --format json 2>&1)
+    FETCH_STATUS=$?
+    log "team-open-prs output: $FETCH_OUTPUT"
+else
+    "$SCRIPT_DIR/team-open-prs" --format json > /dev/null 2>&1
+    FETCH_STATUS=$?
+fi
+
+if [[ $FETCH_STATUS -eq 0 ]]; then
     notify "✓ PR cache initialized"
-    # Store initial count
-    INITIAL_COUNT=$("$SCRIPT_DIR/team-open-prs" --format json --age 7 2>/dev/null | jq '. | length' 2>/dev/null || echo "0")
+    PR_JSON=$("$SCRIPT_DIR/team-open-prs" --format json 2>/dev/null)
+    INITIAL_COUNT=$(echo "$PR_JSON" | jq '. | length' 2>/dev/null || echo "0")
     echo "$INITIAL_COUNT" > "$PR_COUNT_FILE"
     log "Initial PR count: $INITIAL_COUNT"
+
+    # Create baseline if none exists
+    if [[ ! -f "$BASELINE_FILE" ]]; then
+        create_baseline "$PR_JSON"
+        show_popup "PR cache initialized\n\nTotal: $INITIAL_COUNT PRs\nBaseline created\n\nPress Alt-g to view" 3 8
+    else
+        # Check for changes against existing baseline
+        if CHANGES=$(detect_changes "$PR_JSON"); then
+            POPUP_MSG=$(format_changes_popup "$CHANGES")
+            if [[ -n "$POPUP_MSG" ]]; then
+                # Count lines for popup height
+                LINE_COUNT=$(echo "$POPUP_MSG" | wc -l)
+                HEIGHT=$((LINE_COUNT + 4))
+                [[ $HEIGHT -lt 7 ]] && HEIGHT=7
+                [[ $HEIGHT -gt 15 ]] && HEIGHT=15
+                show_popup "$POPUP_MSG\n\nPress Alt-g to view" 5 $HEIGHT
+            fi
+        else
+            show_popup "PR cache ready\n\nTotal: $INITIAL_COUNT PRs\nNo new activity\n\nPress Alt-g to view" 3 8
+        fi
+    fi
 else
     log "ERROR: Initial PR fetch failed"
 fi
@@ -102,25 +379,37 @@ while true; do
     OLD_COUNT=$(cat "$PR_COUNT_FILE" 2>/dev/null || echo "0")
     log "Previous PR count: $OLD_COUNT"
 
-    if "$SCRIPT_DIR/team-open-prs" --format json --age 7 > /dev/null 2>&1; then
-        # Get new count
-        NEW_COUNT=$("$SCRIPT_DIR/team-open-prs" --format json --age 7 2>/dev/null | jq '. | length' 2>/dev/null || echo "0")
+    if [[ $VERBOSE -eq 1 ]]; then
+        FETCH_OUTPUT=$("$SCRIPT_DIR/team-open-prs" --format json 2>&1)
+        FETCH_STATUS=$?
+        log "team-open-prs output: $FETCH_OUTPUT"
+    else
+        "$SCRIPT_DIR/team-open-prs" --format json > /dev/null 2>&1
+        FETCH_STATUS=$?
+    fi
+
+    if [[ $FETCH_STATUS -eq 0 ]]; then
+        PR_JSON=$("$SCRIPT_DIR/team-open-prs" --format json 2>/dev/null)
+        NEW_COUNT=$(echo "$PR_JSON" | jq '. | length' 2>/dev/null || echo "0")
         echo "$NEW_COUNT" > "$PR_COUNT_FILE"
         log "New PR count: $NEW_COUNT"
 
         notify "✓ PR cache refreshed"
 
-        # Check if count changed
-        if [[ "$NEW_COUNT" -gt "$OLD_COUNT" ]]; then
-            DIFF=$((NEW_COUNT - OLD_COUNT))
-            log "CHANGE DETECTED: $DIFF new PRs (showing popup)"
-            show_popup "New PRs detected!\n\n$DIFF new pull request(s)\nTotal: $NEW_COUNT PRs\n\nPress Alt-g to view" 5
-        elif [[ "$NEW_COUNT" -lt "$OLD_COUNT" ]]; then
-            DIFF=$((OLD_COUNT - NEW_COUNT))
-            log "CHANGE DETECTED: $DIFF PRs closed/merged (showing popup)"
-            show_popup "PR updates\n\n$DIFF PR(s) closed/merged\nTotal: $NEW_COUNT PRs" 3
+        # Detect changes against baseline
+        if CHANGES=$(detect_changes "$PR_JSON"); then
+            log "Changes detected since baseline"
+            POPUP_MSG=$(format_changes_popup "$CHANGES")
+            if [[ -n "$POPUP_MSG" ]]; then
+                LINE_COUNT=$(echo "$POPUP_MSG" | wc -l)
+                HEIGHT=$((LINE_COUNT + 4))
+                [[ $HEIGHT -lt 7 ]] && HEIGHT=7
+                [[ $HEIGHT -gt 15 ]] && HEIGHT=15
+                show_popup "$POPUP_MSG\n\nPress Alt-g to view" 5 $HEIGHT
+            fi
         else
-            log "No change in PR count"
+            log "No changes since baseline"
+            show_popup "PR cache refreshed\n\nNo new activity\nTotal: $NEW_COUNT PRs" 2 7
         fi
     else
         log "ERROR: PR cache refresh failed"
