@@ -5,12 +5,33 @@
 #   All options are passed to team-open-prs
 #   Keybindings:
 #     Ctrl-R: Reload/refresh cache
-#     Ctrl-X: Cache management menu
 #     Ctrl-S: Sort options
 #     Ctrl-F: Filter options
+#     Ctrl-X: Mark all as seen (reset change baseline)
+#     Ctrl-E: Edit watched repos
+#     Ctrl-U: Edit watched users/contributors
+#
+#   Change indicators:
+#     * (magenta): Your PR has new activity
+#     * (yellow): Other PR has new activity
+#     [+Nc +Nr STATUS]: New comments, reviews, or approval status change
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CACHE_DIR="${HOME}/.cache/gh-pr-cache"
+CONFIG_FILE="${HOME}/.config/gh-pr-select/repos.txt"
+CHANGES_FILE="${CACHE_DIR}/changes.json"
+
+# Check if repos are configured, if not prompt for selection
+if [[ ! -f "$CONFIG_FILE" ]] || [[ ! -s "$CONFIG_FILE" ]]; then
+    echo "No repos configured for PR watching."
+    echo "Let's select some repos you've worked in recently..."
+    echo ""
+    "$SCRIPT_DIR/select-repos"
+    if [[ ! -f "$CONFIG_FILE" ]] || [[ ! -s "$CONFIG_FILE" ]]; then
+        echo "No repos selected. Exiting."
+        exit 0
+    fi
+fi
 
 # Default sort/filter settings
 SORT_BY="date"  # date, author, status, comments, repo
@@ -40,17 +61,56 @@ else
     CLIP_CMD=""
 fi
 
+# Load changes data if available
+load_changes() {
+    if [[ -f "$CHANGES_FILE" ]]; then
+        cat "$CHANGES_FILE"
+    else
+        echo '{"myPRs":{},"otherPRs":{}}'
+    fi
+}
+
 # Main loop to allow refresh
 REFRESH_MARKER="/tmp/pr-select-refresh-$$"
-trap "rm -f $REFRESH_MARKER" EXIT
+RESET_MARKER="/tmp/pr-select-reset-$$"
+trap "rm -f $REFRESH_MARKER $RESET_MARKER" EXIT
 
 while true; do
-    # Fetch PRs as JSON
+    # Fetch PRs as JSON (show spinner)
+    printf "Fetching PRs... " >&2
     PR_JSON=$("$SCRIPT_DIR/team-open-prs" --format json "$@")
+    echo "done" >&2
 
     if [[ -z "$PR_JSON" ]] || [[ "$PR_JSON" == "[]" ]]; then
-        echo "No PRs found"
-        exit 0
+        # Show config menu instead of exiting
+        REPOS_FILE="${HOME}/.config/gh-pr-select/repos.txt"
+        CURRENT_REPOS=$(cat "$REPOS_FILE" 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
+
+        echo "No PRs found in watched repos."
+        echo ""
+        ACTION=$(printf "Edit watched repos\nEdit contributors\nRefresh\nExit" | fzf \
+            --header="Current repos: ${CURRENT_REPOS:-none}" \
+            --prompt="What would you like to do? > ")
+
+        case "$ACTION" in
+            "Edit watched repos")
+                "$SCRIPT_DIR/select-repos"
+                rm -rf "$CACHE_DIR"/*
+                continue
+                ;;
+            "Edit contributors")
+                "$SCRIPT_DIR/select-contributors"
+                rm -rf "$CACHE_DIR"/*
+                continue
+                ;;
+            "Refresh")
+                rm -rf "$CACHE_DIR"/*
+                continue
+                ;;
+            *)
+                exit 0
+                ;;
+        esac
     fi
 
     # Save JSON to temp file for preview lookups
@@ -122,73 +182,165 @@ while true; do
             ;;
     esac
 
+    # Check if any PRs have Jira tickets
+    HAS_JIRA=$(echo "$SORTED_JSON" | jq '[.[].jiraTicket // null | select(. != null)] | length > 0')
+
+    # Load changes for highlighting
+    CHANGES_JSON=$(load_changes)
+
+    # Calculate max column widths from data
+    MAX_AUTHOR=$(echo "$SORTED_JSON" | jq -r '[.[].author.login | length] | max')
+    MAX_REPO=$(echo "$SORTED_JSON" | jq -r '[.[].repo | length] | max')
+    if [[ "$HAS_JIRA" == "true" ]]; then
+        MAX_JIRA=$(echo "$SORTED_JSON" | jq -r '[.[] | (.jiraTicket // "") | length] | max')
+        [[ "$MAX_JIRA" -gt 15 ]] && MAX_JIRA=15  # Cap Jira at 15
+    fi
+
     # Format PRs for fzf display with colors and aligned columns
     # Colors: Gray (date), Blue (author), Yellow (jira), Green (repo), White (title), Status (Draft/Review/Approved)
     # Keep data separated by │ for parsing, but pad for alignment
     # Include PR number and URLs for lookup (hidden from display)
-    PR_DISPLAY=$(echo "$SORTED_JSON" | jq -r '.[] |
-        (.jiraTicket // "" | .[0:15]) as $jira |
-        (
-            if .isDraft then "\u001b[34mDraft\u001b[0m   "
-            elif ([.reviews[].state] | any(. == "APPROVED")) then "\u001b[32mApproved\u001b[0m"
-            else "\u001b[33mReview\u001b[0m  "
-            end
-        ) as $status |
-        "\u001b[90m\(.createdAt[:10])\u001b[0m│" +
-        "\u001b[34m\(.author.login + (" " * (20 - (.author.login | length))))\u001b[0m│" +
-        "\u001b[33m" + ($jira + (" " * (15 - ($jira | length)))) + "\u001b[0m│" +
-        "\u001b[32m\(.repo + (" " * (18 - (.repo | length))))\u001b[0m│" +
-        $status + "│" +
-        "\(.title) " +
-        "│\(.number)│\(.url)│\(.jiraUrl // "")"')
+
+    # Build column header row
+    COL_DATE=$(printf "%-10s" "DATE")
+    COL_AUTHOR=$(printf "%-${MAX_AUTHOR}s" "AUTHOR")
+    COL_REPO=$(printf "%-${MAX_REPO}s" "REPO")
+    COL_STATUS=$(printf "%-8s" "STATUS")
+
+    if [[ "$HAS_JIRA" == "true" ]]; then
+        COL_JIRA=$(printf "%-${MAX_JIRA}s" "JIRA")
+        HEADER_ROW="\033[1;97m  ${COL_DATE}│${COL_AUTHOR}│${COL_JIRA}│${COL_REPO}│${COL_STATUS}│TITLE\033[0m│││"
+        PR_DISPLAY=$(echo -e "$HEADER_ROW"; echo "$SORTED_JSON" | jq -r --argjson aw "$MAX_AUTHOR" --argjson rw "$MAX_REPO" --argjson jw "$MAX_JIRA" --argjson changes "$CHANGES_JSON" '.[] |
+            (.jiraTicket // "" | .[0:15]) as $jira |
+            (.url) as $url |
+            # Check if this PR has changes
+            (if ($changes.myPRs[$url] != null) then "\u001b[1;35m* \u001b[0m"
+             elif ($changes.otherPRs[$url] != null) then "\u001b[33m* \u001b[0m"
+             else "  "
+             end) as $changeMarker |
+            # Build change suffix for title
+            (if ($changes.myPRs[$url] != null) then
+                " \u001b[35m[" + ([
+                    (if $changes.myPRs[$url].newComments then "+\($changes.myPRs[$url].newComments)c" else empty end),
+                    (if $changes.myPRs[$url].newReviews then "+\($changes.myPRs[$url].newReviews)r" else empty end),
+                    (if $changes.myPRs[$url].approvalChanged then $changes.myPRs[$url].newApprovalStatus else empty end),
+                    (if $changes.myPRs[$url].isNew then "NEW" else empty end)
+                ] | join(" ")) + "]\u001b[0m"
+             elif ($changes.otherPRs[$url] != null) then
+                " \u001b[33m[" + ([
+                    (if $changes.otherPRs[$url].newComments then "+\($changes.otherPRs[$url].newComments)c" else empty end),
+                    (if $changes.otherPRs[$url].newReviews then "+\($changes.otherPRs[$url].newReviews)r" else empty end),
+                    (if $changes.otherPRs[$url].approvalChanged then $changes.otherPRs[$url].newApprovalStatus else empty end),
+                    (if $changes.otherPRs[$url].isNew then "NEW" else empty end)
+                ] | join(" ")) + "]\u001b[0m"
+             else ""
+             end) as $changeSuffix |
+            (
+                if .isDraft then "\u001b[34mDraft\u001b[0m   "
+                elif ([.reviews[].state] | any(. == "APPROVED")) then "\u001b[32mApproved\u001b[0m"
+                else "\u001b[33mReview\u001b[0m  "
+                end
+            ) as $status |
+            $changeMarker +
+            "\u001b[90m\(.createdAt[:10])\u001b[0m│" +
+            "\u001b[34m\(.author.login + (" " * ($aw - (.author.login | length))))\u001b[0m│" +
+            "\u001b[33m" + ($jira + (" " * ($jw - ($jira | length)))) + "\u001b[0m│" +
+            "\u001b[32m\(.repo + (" " * ($rw - (.repo | length))))\u001b[0m│" +
+            $status + "│" +
+            "\(.title)" + $changeSuffix + " " +
+            "│\(.number)│\(.url)│\(.jiraUrl // "")"')
+    else
+        HEADER_ROW="\033[1;97m  ${COL_DATE}│${COL_AUTHOR}│${COL_REPO}│${COL_STATUS}│TITLE\033[0m│││"
+        PR_DISPLAY=$(echo -e "$HEADER_ROW"; echo "$SORTED_JSON" | jq -r --argjson aw "$MAX_AUTHOR" --argjson rw "$MAX_REPO" --argjson changes "$CHANGES_JSON" '.[] |
+            (.url) as $url |
+            # Check if this PR has changes
+            (if ($changes.myPRs[$url] != null) then "\u001b[1;35m* \u001b[0m"
+             elif ($changes.otherPRs[$url] != null) then "\u001b[33m* \u001b[0m"
+             else "  "
+             end) as $changeMarker |
+            # Build change suffix for title
+            (if ($changes.myPRs[$url] != null) then
+                " \u001b[35m[" + ([
+                    (if $changes.myPRs[$url].newComments then "+\($changes.myPRs[$url].newComments)c" else empty end),
+                    (if $changes.myPRs[$url].newReviews then "+\($changes.myPRs[$url].newReviews)r" else empty end),
+                    (if $changes.myPRs[$url].approvalChanged then $changes.myPRs[$url].newApprovalStatus else empty end),
+                    (if $changes.myPRs[$url].isNew then "NEW" else empty end)
+                ] | join(" ")) + "]\u001b[0m"
+             elif ($changes.otherPRs[$url] != null) then
+                " \u001b[33m[" + ([
+                    (if $changes.otherPRs[$url].newComments then "+\($changes.otherPRs[$url].newComments)c" else empty end),
+                    (if $changes.otherPRs[$url].newReviews then "+\($changes.otherPRs[$url].newReviews)r" else empty end),
+                    (if $changes.otherPRs[$url].approvalChanged then $changes.otherPRs[$url].newApprovalStatus else empty end),
+                    (if $changes.otherPRs[$url].isNew then "NEW" else empty end)
+                ] | join(" ")) + "]\u001b[0m"
+             else ""
+             end) as $changeSuffix |
+            (
+                if .isDraft then "\u001b[34mDraft\u001b[0m   "
+                elif ([.reviews[].state] | any(. == "APPROVED")) then "\u001b[32mApproved\u001b[0m"
+                else "\u001b[33mReview\u001b[0m  "
+                end
+            ) as $status |
+            $changeMarker +
+            "\u001b[90m\(.createdAt[:10])\u001b[0m│" +
+            "\u001b[34m\(.author.login + (" " * ($aw - (.author.login | length))))\u001b[0m│" +
+            "\u001b[32m\(.repo + (" " * ($rw - (.repo | length))))\u001b[0m│" +
+            $status + "│" +
+            "\(.title)" + $changeSuffix + " " +
+            "│\(.number)│\(.url)│"')
+    fi
 
     # Get unique repos for filter menu
     REPOS=($(echo "$PR_JSON" | jq -r '[.[].repo] | unique | .[]'))
 
     # Build header with current sort/filter
-    HEADER="Sort: $SORT_BY ($SORT_ORDER) | Filter: status=${FILTER_STATUS:-all} repo=${FILTER_REPO:-all}"
-    HEADER="$HEADER | Ctrl-S: Sort | Ctrl-F: Filter | Ctrl-R: Refresh | Ctrl-X: Cache"
+    # Count changes for header display
+    MY_CHANGES_COUNT=$(echo "$CHANGES_JSON" | jq '.myPRs | length')
+    OTHER_CHANGES_COUNT=$(echo "$CHANGES_JSON" | jq '.otherPRs | length')
+    if [[ "$MY_CHANGES_COUNT" -gt 0 ]] || [[ "$OTHER_CHANGES_COUNT" -gt 0 ]]; then
+        CHANGES_INDICATOR=" | Changes: ${MY_CHANGES_COUNT} mine, ${OTHER_CHANGES_COUNT} other"
+    else
+        CHANGES_INDICATOR=""
+    fi
+    HEADER="Sort: $SORT_BY ($SORT_ORDER) | Filter: status=${FILTER_STATUS:-all} repo=${FILTER_REPO:-all}${CHANGES_INDICATOR}"
+    HEADER="$HEADER | ^S:Sort ^F:Filter ^R:Refresh ^X:MarkSeen ^E:Repos ^U:Users"
+
+    # Determine which columns to show based on whether Jira is present
+    if [[ "$HAS_JIRA" == "true" ]]; then
+        FZF_WITH_NTH="1,2,3,4,5,6"
+        PR_NUM_FIELD=7
+    else
+        FZF_WITH_NTH="1,2,3,4,5"
+        PR_NUM_FIELD=6
+    fi
+
+    # Define marker files for sort/filter state
+    SORT_MARKER="/tmp/pr-select-sort-$$"
+    FILTER_MARKER="/tmp/pr-select-filter-$$"
 
     # Select PR with fzf with detailed preview
-    SELECTED=$(echo "$PR_DISPLAY" | FZF_PR_JSON="$PR_JSON_FILE" SORT_MARKER="/tmp/pr-select-sort-$$" FILTER_MARKER="/tmp/pr-select-filter-$$" fzf \
+    SELECTED=$(echo "$PR_DISPLAY" | FZF_PR_JSON="$PR_JSON_FILE" FZF_CHANGES_FILE="$CHANGES_FILE" PR_NUM_FIELD="$PR_NUM_FIELD" HAS_JIRA="$HAS_JIRA" fzf \
         --ansi \
+        --layout=reverse \
         --header="$HEADER" \
+        --header-lines=1 \
         --delimiter="│" \
-        --with-nth=1,2,3,4,5,6 \
+        --with-nth="$FZF_WITH_NTH" \
         --bind="ctrl-r:execute-silent(rm -rf $CACHE_DIR/* && touch $REFRESH_MARKER)+abort" \
-        --bind="ctrl-x:execute($SCRIPT_DIR/.pr-cache-menu)" \
+        --bind="ctrl-x:execute-silent($SCRIPT_DIR/pr-cache-refresh --reset && touch $RESET_MARKER)+abort" \
         --bind="ctrl-s:execute(bash -c \"$SCRIPT_DIR/.pr-sort-menu $SORT_BY $SORT_ORDER > $SORT_MARKER\")+abort" \
         --bind="ctrl-f:execute(bash -c \"$SCRIPT_DIR/.pr-filter-menu '$FILTER_STATUS' '$FILTER_REPO' ${REPOS[*]} > $FILTER_MARKER\")+abort" \
+        --bind="ctrl-e:execute($SCRIPT_DIR/select-repos)+execute-silent(rm -rf $CACHE_DIR/* && touch $REFRESH_MARKER)+abort" \
+        --bind="ctrl-u:execute($SCRIPT_DIR/select-contributors)+execute-silent(rm -rf $CACHE_DIR/* && touch $REFRESH_MARKER)+abort" \
         --preview='
-            PR_NUM=$(echo {} | cut -d"│" -f7)
-            jq -r ".[] | select(.number == ($PR_NUM)) |
-                . as \$pr |
-                \"\u001b[1;97mTitle:\u001b[0m \" + .title + \"\\n\" +
-                \"\u001b[34mAuthor:\u001b[0m \" + .author.login + \"\\n\" +
-                (if .jiraTicket then (\"\u001b[33mJira:\u001b[0m \" + .jiraTicket + \"\\n\") else \"\" end) +
-                \"\u001b[32mState:\u001b[0m \" + (
-                    if .state == \"OPEN\" then
-                        (if .isDraft then \"\u001b[33mDRAFT\u001b[0m\" else \"\u001b[32mOPEN\u001b[0m\" end)
-                    elif .state == \"CLOSED\" then \"\u001b[31mCLOSED\u001b[0m\"
-                    elif .state == \"MERGED\" then \"\u001b[35mMERGED\u001b[0m\"
-                    else .state
-                    end
-                ) + \"\\n\" +
-                \"\u001b[90mUpdated:\u001b[0m \" + .updatedAt + \"\\n\" +
-                \"\u001b[36mComments:\u001b[0m \" + (.comments | length | tostring) + \"\\n\" +
-                \"\u001b[32mApproved:\u001b[0m \" + (if ([.reviews[].state] | any(. == \"APPROVED\")) then \"\u001b[32mYes\u001b[0m\" else \"\u001b[31mNo\u001b[0m\" end) + \"\\n\" +
-                \"\u001b[35mReviews by:\u001b[0m \" + (if (.reviews | length) > 0 then ([.reviews[].author.login] | unique | map(select(. != \$pr.author.login)) | join(\", \")) else \"None\" end) + \"\\n\" +
-                \"\\n\u001b[1mDescription:\u001b[0m\\n\" +
-                (if .body then (.body | split(\"\\n\") | .[0:50] | join(\"\\n\")) else \"No description\" end)
-            " < "$FZF_PR_JSON"
+            PR_NUM=$(echo {} | cut -d"│" -f$PR_NUM_FIELD)
+            PR_URL=$(echo {} | cut -d"│" -f$((PR_NUM_FIELD + 1)))
+            '"$SCRIPT_DIR"'/.pr-preview "$PR_NUM" "$PR_URL" "$FZF_PR_JSON" "$FZF_CHANGES_FILE"
         ' \
         --preview-window=up:60%:wrap)
 
     FZF_EXIT_CODE=$?
     rm -f "$PR_JSON_FILE"
-
-    SORT_MARKER="/tmp/pr-select-sort-$$"
-    FILTER_MARKER="/tmp/pr-select-filter-$$"
 
     # Check if user changed sort
     if [[ -f "$SORT_MARKER" ]]; then
@@ -227,26 +379,50 @@ while true; do
         continue
     fi
 
+    # Check if user pressed Ctrl-X (reset marker file exists)
+    if [[ -f "$RESET_MARKER" ]]; then
+        rm -f "$RESET_MARKER"
+        echo "Baseline reset - all PR activity marked as seen"
+        continue
+    fi
+
     # Exit loop if no selection (ESC or Ctrl-C)
     if [[ -z "$SELECTED" ]]; then
         exit 0
     fi
+
+    # Save HAS_JIRA for use after loop
+    SELECTED_HAS_JIRA="$HAS_JIRA"
 
     # Break out of loop to process selection
     break
 done
 
 # Extract PR details (strip ANSI color codes)
+# Column layout depends on whether Jira column was shown
 SELECTED_CLEAN=$(echo "$SELECTED" | sed 's/\x1b\[[0-9;]*m//g')
 PR_DATE=$(echo "$SELECTED_CLEAN" | cut -d'│' -f1 | xargs)
 PR_AUTHOR=$(echo "$SELECTED_CLEAN" | cut -d'│' -f2 | xargs)
-PR_JIRA=$(echo "$SELECTED_CLEAN" | cut -d'│' -f3 | xargs)
-PR_REPO=$(echo "$SELECTED_CLEAN" | cut -d'│' -f4 | xargs)
-PR_APPROVED=$(echo "$SELECTED_CLEAN" | cut -d'│' -f5 | xargs)
-PR_TITLE=$(echo "$SELECTED_CLEAN" | cut -d'│' -f6 | xargs)
-PR_NUMBER=$(echo "$SELECTED_CLEAN" | cut -d'│' -f7 | xargs)
-PR_URL=$(echo "$SELECTED_CLEAN" | cut -d'│' -f8 | xargs)
-PR_JIRA_URL=$(echo "$SELECTED_CLEAN" | cut -d'│' -f9 | xargs)
+
+if [[ "$SELECTED_HAS_JIRA" == "true" ]]; then
+    # With Jira: date│author│jira│repo│status│title│number│url│jiraUrl
+    PR_JIRA=$(echo "$SELECTED_CLEAN" | cut -d'│' -f3 | xargs)
+    PR_REPO=$(echo "$SELECTED_CLEAN" | cut -d'│' -f4 | xargs)
+    PR_APPROVED=$(echo "$SELECTED_CLEAN" | cut -d'│' -f5 | xargs)
+    PR_TITLE=$(echo "$SELECTED_CLEAN" | cut -d'│' -f6 | xargs)
+    PR_NUMBER=$(echo "$SELECTED_CLEAN" | cut -d'│' -f7 | xargs)
+    PR_URL=$(echo "$SELECTED_CLEAN" | cut -d'│' -f8 | xargs)
+    PR_JIRA_URL=$(echo "$SELECTED_CLEAN" | cut -d'│' -f9 | xargs)
+else
+    # Without Jira: date│author│repo│status│title│number│url│
+    PR_JIRA=""
+    PR_REPO=$(echo "$SELECTED_CLEAN" | cut -d'│' -f3 | xargs)
+    PR_APPROVED=$(echo "$SELECTED_CLEAN" | cut -d'│' -f4 | xargs)
+    PR_TITLE=$(echo "$SELECTED_CLEAN" | cut -d'│' -f5 | xargs)
+    PR_NUMBER=$(echo "$SELECTED_CLEAN" | cut -d'│' -f6 | xargs)
+    PR_URL=$(echo "$SELECTED_CLEAN" | cut -d'│' -f7 | xargs)
+    PR_JIRA_URL=""
+fi
 
 # Build action menu dynamically based on whether Jira exists
 if [[ -n "$PR_JIRA_URL" ]]; then
