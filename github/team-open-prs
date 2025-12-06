@@ -62,10 +62,28 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Remaining arguments are repos
+CONFIG_FILE="${HOME}/.config/gh-pr-select/repos.txt"
 if [[ $# -eq 0 ]]; then
-    REPOS=("zendesk/billing" "zendesk/growth-engine" "zendesk/kennel")
+    # Try to read from config file
+    if [[ -f "$CONFIG_FILE" ]]; then
+        REPOS=()
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && REPOS+=("$line")
+        done < "$CONFIG_FILE"
+    else
+        echo "No repos configured. Run 'select-repos' to choose repos to watch." >&2
+        echo "[]"
+        exit 0
+    fi
 else
     REPOS=("$@")
+fi
+
+# Check if repos array is empty
+if [[ ${#REPOS[@]} -eq 0 ]]; then
+    echo "No repos configured. Run 'select-repos' to choose repos to watch." >&2
+    echo "[]"
+    exit 0
 fi
 
 # Validate format
@@ -74,56 +92,90 @@ if [[ "$FORMAT" != "markdown" && "$FORMAT" != "json" ]]; then
     exit 1
 fi
 
-# Calculate date for PR search
+# Calculate date for PR search (needed for cache key)
 if [[ "$OSTYPE" == "darwin"* ]]; then
     DATE_FILTER=$(date -u -v-${DAYS_BACK}d +"%Y-%m-%d")
 else
     DATE_FILTER=$(date -u -d "${DAYS_BACK} days ago" +"%Y-%m-%d")
 fi
 
-# Determine which users to filter by
+# Determine which users to filter by (needed for cache key)
+CONTRIBUTORS_CONFIG="${HOME}/.config/gh-pr-select/contributors.txt"
 if [[ ${#USERS[@]} -eq 0 ]]; then
-    # Fall back to contributors file if --user not specified
-    CONTRIBUTORS_FILE="$SCRIPT_DIR/growth-engine-contributors.yml"
-    if [[ ! -f "$CONTRIBUTORS_FILE" ]]; then
-        echo "Error: Contributors file not found at $CONTRIBUTORS_FILE" >&2
-        exit 1
+    if [[ -f "$CONTRIBUTORS_CONFIG" ]] && [[ -s "$CONTRIBUTORS_CONFIG" ]]; then
+        CONTRIBUTORS=$(cat "$CONTRIBUTORS_CONFIG")
+    else
+        CONTRIBUTORS_FILE="$SCRIPT_DIR/growth-engine-contributors.yml"
+        if [[ -f "$CONTRIBUTORS_FILE" ]]; then
+            CONTRIBUTORS=$(grep -E '^\s*-\s+' "$CONTRIBUTORS_FILE" | sed 's/^[[:space:]]*-[[:space:]]*//')
+        else
+            CONTRIBUTORS=""
+        fi
     fi
-    # Extract contributors from YAML (simple grep-based approach)
-    CONTRIBUTORS=$(grep -E '^\s*-\s+' "$CONTRIBUTORS_FILE" | sed 's/^[[:space:]]*-[[:space:]]*//')
 else
-    # Use users from command line
     CONTRIBUTORS=$(printf "%s\n" "${USERS[@]}")
 fi
 
-# Build jq filter for contributors
-JQ_FILTER=$(echo "$CONTRIBUTORS" | while read -r user; do
-    echo ".author.login == \"$user\""
-done | paste -sd '|' - | sed 's/|/ or /g')
-
-# Setup cache
+# Check cache EARLY (before slow repo access checks)
 CACHE_DIR="${HOME}/.cache/gh-pr-cache"
 mkdir -p "$CACHE_DIR"
-
-# Generate cache key from parameters
 CACHE_KEY_DATA="${FORMAT}|${DATE_FILTER}|${CONTRIBUTORS}|${REPOS[*]}"
 CACHE_KEY=$(echo -n "$CACHE_KEY_DATA" | md5sum 2>/dev/null | cut -d' ' -f1 || echo -n "$CACHE_KEY_DATA" | md5 | cut -d' ' -f1)
 CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.cache"
 
-# Check cache if enabled
 if [[ "$USE_CACHE" == "true" ]] && [[ -f "$CACHE_FILE" ]]; then
-    # Check if cache is still fresh
     if [[ "$OSTYPE" == "darwin"* ]]; then
         CACHE_AGE=$(($(date +%s) - $(stat -f %m "$CACHE_FILE")))
     else
         CACHE_AGE=$(($(date +%s) - $(stat -c %Y "$CACHE_FILE")))
     fi
-
     if [[ $CACHE_AGE -lt $CACHE_TTL ]]; then
-        # Cache is fresh, use it
         cat "$CACHE_FILE"
         exit 0
     fi
+fi
+
+# Function to check repo access
+check_repo_access() {
+    local repo="$1"
+    local auth_test=$(gh api "repos/${repo}" 2>&1)
+    if echo "$auth_test" | grep -qi "SAML enforcement\|OAuth token access\|authorization_request"; then
+        echo "Warning: Skipping ${repo} - SAML authorization required for ${repo%%/*} org" >&2
+        return 1
+    fi
+    if echo "$auth_test" | grep -qi "Not Found\|Could not resolve"; then
+        echo "Warning: Skipping ${repo} - repo not found or inaccessible" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Filter repos to only those we can access
+ACCESSIBLE_REPOS=()
+for repo in "${REPOS[@]}"; do
+    if check_repo_access "$repo"; then
+        ACCESSIBLE_REPOS+=("$repo")
+    fi
+done
+
+if [[ ${#ACCESSIBLE_REPOS[@]} -eq 0 ]]; then
+    echo "Warning: No accessible repos found" >&2
+    if [[ "$FORMAT" == "json" ]]; then
+        echo "[]"
+    fi
+    exit 0
+fi
+
+REPOS=("${ACCESSIBLE_REPOS[@]}")
+
+# Build jq filter for contributors
+if [[ -z "$CONTRIBUTORS" ]]; then
+    JQ_FILTER="true"
+else
+    JQ_FILTER=$(echo "$CONTRIBUTORS" | while read -r user; do
+        [[ -n "$user" ]] && echo ".author.login == \"$user\""
+    done | paste -sd '|' - | sed 's/|/ or /g')
+    [[ -z "$JQ_FILTER" ]] && JQ_FILTER="true"
 fi
 
 # Fetch PRs based on format and cache the result
