@@ -1,0 +1,78 @@
+#!/usr/bin/env zsh
+
+usage="NAME
+      compress-video - compress video files for GitHub PR uploads
+
+SYNOPSIS
+      compress-video [-h] [-c CRF] input [output]
+
+DESCRIPTION
+      Compresses video files using H.264 encoding. Useful for reducing
+      screen recording sizes before uploading to GitHub PRs.
+
+ARGUMENTS
+      input
+          Input video file (e.g., recording.mov)
+
+      output (optional)
+          Output file path. Defaults to input filename with .mp4 extension.
+
+      -c, --crf VALUE
+          Constant Rate Factor (0-51). Higher = smaller file, lower quality.
+          Default: 28. Recommended range: 23-32.
+
+      -h, --help
+          Show this help message.
+
+EXAMPLES
+      compress-video recording.mov
+      compress-video recording.mov compressed.mp4
+      compress-video -c 32 recording.mov  # higher compression
+"
+
+crf=28
+
+while (( $# > 0 )); do
+	case "$1" in
+	-h | --help)
+		echo "$usage"
+		exit 0
+		;;
+	-c | --crf)
+		crf=$2
+		shift 2
+		;;
+	-*)
+		echo "Unknown option: $1" >&2
+		echo "$usage" >&2
+		exit 1
+		;;
+	*)
+		break
+		;;
+	esac
+done
+
+input="$1"
+output="$2"
+
+if [[ -z "$input" ]]; then
+	echo "Error: input file required" >&2
+	echo "$usage" >&2
+	exit 1
+fi
+
+if [[ ! -f "$input" ]]; then
+	echo "Error: file not found: $input" >&2
+	exit 1
+fi
+
+if [[ -z "$output" ]]; then
+	output="${input:r}.mp4"
+	if [[ "$output" == "$input" ]]; then
+		output="${input:r}-compressed.mp4"
+	fi
+fi
+
+echo "Compressing: $input -> $output (CRF: $crf)"
+ffmpeg -i "$input" -vcodec libx264 -crf "$crf" "$output"
