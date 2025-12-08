@@ -10,6 +10,7 @@
 #     Ctrl-X: Mark all as seen (reset change baseline)
 #     Ctrl-E: Edit watched repos
 #     Ctrl-U: Edit watched users/contributors
+#     Ctrl-O: Settings (age, cache TTL, refresh interval)
 #
 #   Change indicators:
 #     * (magenta): Your PR has new activity
@@ -17,17 +18,24 @@
 #     [+Nc +Nr STATUS]: New comments, reviews, or approval status change
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/.pr-config"
+
 CACHE_DIR="${HOME}/.cache/gh-pr-cache"
-CONFIG_FILE="${HOME}/.config/gh-pr-select/repos.txt"
+REPOS_FILE="${HOME}/.config/gh-pr-select/repos.txt"
 CHANGES_FILE="${CACHE_DIR}/changes.json"
 
+# Load config values
+AGE_DAYS=$(get_config age_days 28)
+CACHE_TTL_MINUTES=$(get_config cache_ttl_minutes 29)
+CACHE_TTL_SECONDS=$(minutes_to_seconds "$CACHE_TTL_MINUTES")
+
 # Check if repos are configured, if not prompt for selection
-if [[ ! -f "$CONFIG_FILE" ]] || [[ ! -s "$CONFIG_FILE" ]]; then
+if [[ ! -f "$REPOS_FILE" ]] || [[ ! -s "$REPOS_FILE" ]]; then
     echo "No repos configured for PR watching."
     echo "Let's select some repos you've worked in recently..."
     echo ""
     "$SCRIPT_DIR/select-repos"
-    if [[ ! -f "$CONFIG_FILE" ]] || [[ ! -s "$CONFIG_FILE" ]]; then
+    if [[ ! -f "$REPOS_FILE" ]] || [[ ! -s "$REPOS_FILE" ]]; then
         echo "No repos selected. Exiting."
         exit 0
     fi
@@ -73,13 +81,19 @@ load_changes() {
 # Main loop to allow refresh
 REFRESH_MARKER="/tmp/pr-select-refresh-$$"
 RESET_MARKER="/tmp/pr-select-reset-$$"
-trap "rm -f $REFRESH_MARKER $RESET_MARKER" EXIT
+SETTINGS_MARKER="/tmp/pr-select-settings-$$"
+trap "rm -f $REFRESH_MARKER $RESET_MARKER $SETTINGS_MARKER" EXIT
 
 while true; do
-    # Fetch PRs as JSON (show spinner)
-    printf "Fetching PRs... " >&2
-    PR_JSON=$("$SCRIPT_DIR/team-open-prs" --format json "$@")
-    echo "done" >&2
+    # Reload config values (may have changed via settings menu)
+    AGE_DAYS=$(get_config age_days 28)
+    CACHE_TTL_MINUTES=$(get_config cache_ttl_minutes 29)
+    CACHE_TTL_SECONDS=$(minutes_to_seconds "$CACHE_TTL_MINUTES")
+
+    # Fetch PRs as JSON (show progress)
+    echo "Loading PRs (age: ${AGE_DAYS}d, cache TTL: ${CACHE_TTL_MINUTES}m)..." >&2
+    PR_JSON=$("$SCRIPT_DIR/team-open-prs" --format json --age "$AGE_DAYS" --cache-ttl "$CACHE_TTL_SECONDS" "$@" 2>&2)
+    echo "" >&2
 
     if [[ -z "$PR_JSON" ]] || [[ "$PR_JSON" == "[]" ]]; then
         # Show config menu instead of exiting
@@ -303,7 +317,7 @@ while true; do
         CHANGES_INDICATOR=""
     fi
     HEADER="Sort: $SORT_BY ($SORT_ORDER) | Filter: status=${FILTER_STATUS:-all} repo=${FILTER_REPO:-all}${CHANGES_INDICATOR}"
-    HEADER="$HEADER | ^S:Sort ^F:Filter ^R:Refresh ^X:MarkSeen ^E:Repos ^U:Users"
+    HEADER="$HEADER | ^S:Sort ^F:Filter ^R:Refresh ^X:MarkSeen ^O:Settings ^E:Repos ^U:Users"
 
     # Determine which columns to show based on whether Jira is present
     if [[ "$HAS_JIRA" == "true" ]]; then
@@ -330,6 +344,7 @@ while true; do
         --bind="ctrl-x:execute-silent($SCRIPT_DIR/pr-cache-refresh --reset && touch $RESET_MARKER)+abort" \
         --bind="ctrl-s:execute(bash -c \"$SCRIPT_DIR/.pr-sort-menu $SORT_BY $SORT_ORDER > $SORT_MARKER\")+abort" \
         --bind="ctrl-f:execute(bash -c \"$SCRIPT_DIR/.pr-filter-menu '$FILTER_STATUS' '$FILTER_REPO' ${REPOS[*]} > $FILTER_MARKER\")+abort" \
+        --bind="ctrl-o:execute(bash -c \"$SCRIPT_DIR/.pr-settings-menu > $SETTINGS_MARKER\")+abort" \
         --bind="ctrl-e:execute($SCRIPT_DIR/select-repos)+execute-silent(rm -rf $CACHE_DIR/* && touch $REFRESH_MARKER)+abort" \
         --bind="ctrl-u:execute($SCRIPT_DIR/select-contributors)+execute-silent(rm -rf $CACHE_DIR/* && touch $REFRESH_MARKER)+abort" \
         --preview='
@@ -368,6 +383,17 @@ while true; do
             elif [[ "$FILTER_TYPE" == "repo" ]]; then
                 FILTER_REPO="$FILTER_VALUE"
             fi
+        fi
+        continue
+    fi
+
+    # Check if user changed settings
+    if [[ -f "$SETTINGS_MARKER" ]]; then
+        SETTINGS_RESULT=$(cat "$SETTINGS_MARKER")
+        rm -f "$SETTINGS_MARKER"
+        if [[ "$SETTINGS_RESULT" == "settings_changed" ]]; then
+            echo "Settings updated. Clearing cache and refreshing..."
+            rm -rf "$CACHE_DIR"/*
         fi
         continue
     fi

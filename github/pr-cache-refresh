@@ -6,18 +6,25 @@
 #   --force: Kill existing process if running
 #   --verbose, -v: Log to stdout in addition to log file
 #   --reset: Reset the baseline (mark all current activity as "seen")
+#   interval_seconds: Override config refresh interval (optional)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/.pr-config"
+
 LOG_FILE="/tmp/pr-cache-refresh.log"
 CACHE_DIR="${HOME}/.cache/gh-pr-cache"
 BASELINE_FILE="${CACHE_DIR}/baseline.json"
 CHANGES_FILE="${CACHE_DIR}/changes.json"
 
+# Load config values
+AGE_DAYS=$(get_config age_days 28)
+REFRESH_INTERVAL_MINUTES=$(get_config refresh_interval_minutes 30)
+INTERVAL=$(minutes_to_seconds "$REFRESH_INTERVAL_MINUTES")
+
 # Parse arguments
 FORCE=0
 VERBOSE=0
 RESET_ONLY=0
-INTERVAL=600  # Default 10 minutes
 for arg in "$@"; do
     case $arg in
         --force)
@@ -262,7 +269,7 @@ PR_COUNT_FILE="/tmp/pr-cache-count"
 if [[ $RESET_ONLY -eq 1 ]]; then
     log "Reset requested"
     # Fetch current PRs and create new baseline
-    PR_JSON=$("$SCRIPT_DIR/team-open-prs" --format json 2>/dev/null)
+    PR_JSON=$("$SCRIPT_DIR/team-open-prs" --format json --age "$AGE_DAYS" 2>/dev/null)
     if [[ -n "$PR_JSON" ]] && [[ "$PR_JSON" != "[]" ]]; then
         create_baseline "$PR_JSON"
         echo "Baseline reset. All current PR activity marked as seen."
@@ -330,17 +337,17 @@ log "Running initial PR fetch..."
 get_github_user > /dev/null
 
 if [[ $VERBOSE -eq 1 ]]; then
-    FETCH_OUTPUT=$("$SCRIPT_DIR/team-open-prs" --format json 2>&1)
+    FETCH_OUTPUT=$("$SCRIPT_DIR/team-open-prs" --format json --age "$AGE_DAYS" 2>&1)
     FETCH_STATUS=$?
     log "team-open-prs output: $FETCH_OUTPUT"
 else
-    "$SCRIPT_DIR/team-open-prs" --format json > /dev/null 2>&1
+    "$SCRIPT_DIR/team-open-prs" --format json --age "$AGE_DAYS" > /dev/null 2>&1
     FETCH_STATUS=$?
 fi
 
 if [[ $FETCH_STATUS -eq 0 ]]; then
     notify "✓ PR cache initialized"
-    PR_JSON=$("$SCRIPT_DIR/team-open-prs" --format json 2>/dev/null)
+    PR_JSON=$("$SCRIPT_DIR/team-open-prs" --format json --age "$AGE_DAYS" 2>/dev/null)
     INITIAL_COUNT=$(echo "$PR_JSON" | jq '. | length' 2>/dev/null || echo "0")
     echo "$INITIAL_COUNT" > "$PR_COUNT_FILE"
     log "Initial PR count: $INITIAL_COUNT"
@@ -380,16 +387,16 @@ while true; do
     log "Previous PR count: $OLD_COUNT"
 
     if [[ $VERBOSE -eq 1 ]]; then
-        FETCH_OUTPUT=$("$SCRIPT_DIR/team-open-prs" --format json 2>&1)
+        FETCH_OUTPUT=$("$SCRIPT_DIR/team-open-prs" --format json --age "$AGE_DAYS" 2>&1)
         FETCH_STATUS=$?
         log "team-open-prs output: $FETCH_OUTPUT"
     else
-        "$SCRIPT_DIR/team-open-prs" --format json > /dev/null 2>&1
+        "$SCRIPT_DIR/team-open-prs" --format json --age "$AGE_DAYS" > /dev/null 2>&1
         FETCH_STATUS=$?
     fi
 
     if [[ $FETCH_STATUS -eq 0 ]]; then
-        PR_JSON=$("$SCRIPT_DIR/team-open-prs" --format json 2>/dev/null)
+        PR_JSON=$("$SCRIPT_DIR/team-open-prs" --format json --age "$AGE_DAYS" 2>/dev/null)
         NEW_COUNT=$(echo "$PR_JSON" | jq '. | length' 2>/dev/null || echo "0")
         echo "$NEW_COUNT" > "$PR_COUNT_FILE"
         log "New PR count: $NEW_COUNT"
