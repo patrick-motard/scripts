@@ -1,0 +1,64 @@
+#!/bin/bash
+
+# Shared config loader for PR scripts
+# Usage: source this file, then call get_config <key>
+
+CONFIG_FILE="${HOME}/.config/gh-pr-select/config.yml"
+CONFIG_DIR="$(dirname "$CONFIG_FILE")"
+
+# Ensure config exists with defaults
+ensure_config() {
+    mkdir -p "$CONFIG_DIR"
+
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        cat > "$CONFIG_FILE" <<'EOF'
+# PR Selector Configuration
+# This file controls settings for pr-select and pr-cache-refresh
+
+# Number of days to look back for PRs
+age_days: 28
+
+# Cache TTL in minutes (how long cached PR data is valid)
+# Should be longer than refresh_interval to avoid cache misses
+cache_ttl_minutes: 29
+
+# Background refresh interval in minutes (pr-cache-refresh)
+# Recommended: 10, 30, or 60
+refresh_interval_minutes: 30
+EOF
+    fi
+}
+
+# Read config value
+# Usage: get_config age_days
+get_config() {
+    local key="$1"
+    local default="$2"
+
+    ensure_config
+
+    local value=$(yq ".$key" "$CONFIG_FILE" 2>/dev/null)
+
+    # Return default if key not found or null
+    if [[ "$value" == "null" ]] || [[ -z "$value" ]]; then
+        echo "$default"
+    else
+        echo "$value"
+    fi
+}
+
+# Write config value
+# Usage: set_config age_days 30
+set_config() {
+    local key="$1"
+    local value="$2"
+
+    ensure_config
+
+    yq -i ".$key = $value" "$CONFIG_FILE"
+}
+
+# Convert minutes to seconds
+minutes_to_seconds() {
+    echo $(($1 * 60))
+}

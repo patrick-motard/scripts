@@ -1,0 +1,61 @@
+#!/bin/bash
+# Settings menu for PR selector
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/.pr-config"
+
+# Get current settings
+CURRENT_AGE=$(get_config age_days 28)
+CURRENT_CACHE_TTL=$(get_config cache_ttl_minutes 29)
+CURRENT_REFRESH=$(get_config refresh_interval_minutes 30)
+
+# Show settings menu
+action=$(printf "Age: Days to look back (current: $CURRENT_AGE)\nCache TTL: Minutes cache is valid (current: $CURRENT_CACHE_TTL)\nRefresh Interval: Background refresh minutes (current: $CURRENT_REFRESH)\nCancel" | fzf \
+    --header="Settings | Select option to change" \
+    --height=8)
+
+case "$action" in
+    "Age: Days to look back"*)
+        NEW_AGE=$(printf "7\n14\n28\n60\n90" | fzf \
+            --header="Select days to look back (current: $CURRENT_AGE)" \
+            --height=8)
+        if [[ -n "$NEW_AGE" ]]; then
+            set_config age_days "$NEW_AGE"
+            # Calculate and update cache TTL to be slightly longer than refresh interval
+            REFRESH_MIN=$(get_config refresh_interval_minutes 30)
+            NEW_CACHE_TTL=$((REFRESH_MIN + 1))
+            set_config cache_ttl_minutes "$NEW_CACHE_TTL"
+            echo "settings_changed"
+        else
+            echo "cancel"
+        fi
+        ;;
+    "Cache TTL: Minutes cache is valid"*)
+        NEW_TTL=$(printf "5\n10\n15\n29\n31\n60\n120" | fzf \
+            --header="Select cache TTL in minutes (current: $CURRENT_CACHE_TTL)" \
+            --height=10)
+        if [[ -n "$NEW_TTL" ]]; then
+            set_config cache_ttl_minutes "$NEW_TTL"
+            echo "settings_changed"
+        else
+            echo "cancel"
+        fi
+        ;;
+    "Refresh Interval: Background refresh minutes"*)
+        NEW_REFRESH=$(printf "10\n30\n60" | fzf \
+            --header="Select refresh interval in minutes (current: $CURRENT_REFRESH)" \
+            --height=6)
+        if [[ -n "$NEW_REFRESH" ]]; then
+            set_config refresh_interval_minutes "$NEW_REFRESH"
+            # Auto-update cache TTL to be slightly longer
+            NEW_CACHE_TTL=$((NEW_REFRESH + 1))
+            set_config cache_ttl_minutes "$NEW_CACHE_TTL"
+            echo "settings_changed"
+        else
+            echo "cancel"
+        fi
+        ;;
+    *)
+        echo "cancel"
+        ;;
+esac
