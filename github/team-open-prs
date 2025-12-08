@@ -180,28 +180,71 @@ fi
 
 # Fetch PRs based on format and cache the result
 if [[ "$FORMAT" == "json" ]]; then
-    # First get basic PR list
+    # First get basic PR list - fetch repos in parallel
+    echo "Fetching PR lists from ${#REPOS[@]} repos (parallel)..." >&2
     PR_LIST=$(mktemp)
+    TEMP_DIR=$(mktemp -d)
+
+    # Fetch each repo in parallel
     for REPO in "${REPOS[@]}"; do
         REPO_SHORT="${REPO#*/}"
-        gh pr list --repo "$REPO" --state open --search "created:>=$DATE_FILTER" \
-            --json author,createdAt,title,number,url,isDraft,labels 2>/dev/null | \
-            jq -c ".[] | select($JQ_FILTER) | . + {repo: \"$REPO_SHORT\", fullRepo: \"$REPO\"}" >> "$PR_LIST"
+        (
+            echo "  - ${REPO_SHORT}..." >&2
+            gh pr list --repo "$REPO" --state open --search "created:>=$DATE_FILTER" \
+                --json author,createdAt,title,number,url,isDraft,labels 2>/dev/null | \
+                jq -c ".[] | select($JQ_FILTER) | . + {repo: \"$REPO_SHORT\", fullRepo: \"$REPO\"}" > "$TEMP_DIR/${REPO_SHORT}.json"
+        ) &
     done
 
-    # Fetch full details for each PR
-    {
-        while IFS= read -r pr; do
-            PR_URL=$(echo "$pr" | jq -r '.url')
-            # Get full PR details and merge with list data, extract Jira ticket
-            gh pr view "$PR_URL" --json state,updatedAt,comments,body,reviews 2>/dev/null | \
-                jq -c ". + $(echo "$pr") |
-                    .jiraTicket = (if .body then ((.body | match(\"https://zendesk\\\\.atlassian\\\\.net/browse/(?<ticket>[A-Z]+-[0-9]+)\") | .captures[0].string) // null) else null end) |
-                    .jiraUrl = (if .jiraTicket then \"https://zendesk.atlassian.net/browse/\" + .jiraTicket else null end)"
-        done < "$PR_LIST"
-    } | jq -s '.' | tee "$CACHE_FILE"
+    # Wait for all repo fetches to complete
+    wait
 
-    rm -f "$PR_LIST"
+    # Combine all repo results
+    cat "$TEMP_DIR"/*.json 2>/dev/null > "$PR_LIST"
+    rm -rf "$TEMP_DIR"
+
+    # Count PRs and fetch full details in parallel
+    TOTAL_PRS=$(wc -l < "$PR_LIST" | tr -d ' ')
+    if [[ "$TOTAL_PRS" -eq 0 ]]; then
+        echo "[]" | tee "$CACHE_FILE"
+        rm -f "$PR_LIST"
+    else
+        echo "Fetching details for ${TOTAL_PRS} PRs (parallel)..." >&2
+        DETAILS_DIR=$(mktemp -d)
+
+        # Fetch PR details in parallel (max 8 concurrent)
+        COUNT=0
+        while IFS= read -r pr; do
+            COUNT=$((COUNT + 1))
+            PR_URL=$(echo "$pr" | jq -r '.url')
+            PR_NUM=$(echo "$pr" | jq -r '.number')
+            REPO=$(echo "$pr" | jq -r '.repo')
+
+            (
+                echo "  [$COUNT/$TOTAL_PRS] ${REPO}#${PR_NUM}..." >&2
+                # Get full PR details and merge with list data, extract Jira ticket
+                gh pr view "$PR_URL" --json state,updatedAt,comments,body,reviews 2>/dev/null | \
+                    jq -c ". + $(echo "$pr") |
+                        .jiraTicket = (if .body then ((.body | match(\"https://zendesk\\\\.atlassian\\\\.net/browse/(?<ticket>[A-Z]+-[0-9]+)\") | .captures[0].string) // null) else null end) |
+                        .jiraUrl = (if .jiraTicket then \"https://zendesk.atlassian.net/browse/\" + .jiraTicket else null end)" \
+                    > "$DETAILS_DIR/pr-${COUNT}.json"
+            ) &
+
+            # Limit to 8 concurrent fetches
+            if (( COUNT % 8 == 0 )); then
+                wait
+            fi
+        done < "$PR_LIST"
+
+        # Wait for remaining fetches
+        wait
+
+        # Combine all results into array
+        jq -s '.' "$DETAILS_DIR"/pr-*.json | tee "$CACHE_FILE"
+
+        rm -rf "$PR_LIST" "$DETAILS_DIR"
+        echo "Done! Cached ${TOTAL_PRS} PRs" >&2
+    fi
 else
     # Markdown table format
     {
