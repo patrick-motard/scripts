@@ -2,10 +2,11 @@
 
 # Background cache refresher for pr-select
 # Runs team-open-prs to keep cache warm and tracks PR activity changes
-# Usage: pr-cache-refresh [interval_seconds] [--force] [--verbose] [--reset]
+# Usage: pr-cache-refresh [interval_seconds] [--force] [--verbose] [--reset] [--mark-seen <PR_URL>]
 #   --force: Kill existing process if running
 #   --verbose, -v: Log to stdout in addition to log file
 #   --reset: Reset the baseline (mark all current activity as "seen")
+#   --mark-seen <PR_URL>: Mark a specific PR as seen by updating its baseline
 #   interval_seconds: Override config refresh interval (optional)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,7 +26,10 @@ INTERVAL=$(minutes_to_seconds "$REFRESH_INTERVAL_MINUTES")
 FORCE=0
 VERBOSE=0
 RESET_ONLY=0
-for arg in "$@"; do
+MARK_SEEN_URL=""
+i=1
+while [[ $i -le $# ]]; do
+    arg="${!i}"
     case $arg in
         --force)
             FORCE=1
@@ -36,12 +40,17 @@ for arg in "$@"; do
         --reset)
             RESET_ONLY=1
             ;;
+        --mark-seen)
+            ((i++))
+            MARK_SEEN_URL="${!i}"
+            ;;
         *)
             if [[ "$arg" =~ ^[0-9]+$ ]]; then
                 INTERVAL="$arg"
             fi
             ;;
     esac
+    ((i++))
 done
 
 # Logging function (early definition for use in startup)
@@ -261,9 +270,63 @@ format_changes_popup() {
     fi
 }
 
+# Mark a specific PR as seen by updating its baseline entry
+mark_pr_seen() {
+    local pr_url="$1"
+
+    if [[ ! -f "$BASELINE_FILE" ]]; then
+        log "No baseline file found, cannot mark PR as seen"
+        echo "No baseline found. Run pr-select first to create one."
+        return 1
+    fi
+
+    # Fetch current PRs to get the latest state
+    PR_JSON=$("$SCRIPT_DIR/team-open-prs" --format json --age "$AGE_DAYS" 2>/dev/null)
+    if [[ -z "$PR_JSON" ]] || [[ "$PR_JSON" == "[]" ]]; then
+        echo "Could not fetch current PR data"
+        return 1
+    fi
+
+    # Find the PR in the current data
+    local pr_data=$(echo "$PR_JSON" | jq --arg url "$pr_url" '.[] | select(.url == $url)')
+    if [[ -z "$pr_data" ]]; then
+        echo "PR not found: $pr_url"
+        return 1
+    fi
+
+    # Update the baseline for just this PR
+    local baseline=$(cat "$BASELINE_FILE")
+    local updated_baseline=$(echo "$baseline" | jq --argjson pr "$pr_data" --arg url "$pr_url" '
+        .prs[$url] = {
+            commentCount: ($pr.comments | length),
+            reviewCount: ($pr.reviews | length),
+            reviews: ([$pr.reviews[] | "\(.author.login):\(.state)"] | sort),
+            author: $pr.author.login,
+            number: $pr.number,
+            repo: $pr.repo,
+            title: $pr.title
+        }
+    ')
+
+    echo "$updated_baseline" > "$BASELINE_FILE"
+    log "Updated baseline for PR: $pr_url"
+
+    # Regenerate changes to remove this PR
+    detect_changes "$PR_JSON" > /dev/null
+
+    echo "Marked PR as seen: $pr_url"
+    return 0
+}
+
 PID_FILE="/tmp/pr-cache-refresh.pid"
 STATUS_FILE="/tmp/pr-cache-status"
 PR_COUNT_FILE="/tmp/pr-cache-count"
+
+# Handle --mark-seen flag
+if [[ -n "$MARK_SEEN_URL" ]]; then
+    mark_pr_seen "$MARK_SEEN_URL"
+    exit $?
+fi
 
 # Handle --reset flag
 if [[ $RESET_ONLY -eq 1 ]]; then

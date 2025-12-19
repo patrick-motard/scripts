@@ -44,7 +44,7 @@ generate_left() {
             echo ""
             echo "───────────────────"
             echo ""
-            echo -e "\033[90mCtrl-X: mark seen\033[0m"
+            echo -e "\033[90mCtrl-M: mark seen\033[0m"
         else
             echo -e "\033[90m─ No Updates ─\033[0m"
             echo ""
