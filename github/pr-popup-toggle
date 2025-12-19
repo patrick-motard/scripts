@@ -4,7 +4,6 @@
 # If popup is open, close it. If closed, open it.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MARKER_FILE="/tmp/pr-popup-active-$$"
 
 # Check if we're in tmux
 if [[ -z "$TMUX" ]]; then
@@ -12,18 +11,13 @@ if [[ -z "$TMUX" ]]; then
     exec "$SCRIPT_DIR/pr-select" "$@"
 fi
 
-# Check if popup is already open by looking for the marker file for this tmux session
-TMUX_PANE=$(tmux display-message -p '#{session_name}:#{window_index}.#{pane_index}')
-SESSION_MARKER="/tmp/pr-popup-active-${TMUX_PANE}"
-
-# Try to find any pr-select popup process
-if pgrep -f "pr-select.*tmux.*popup" > /dev/null; then
-    # Popup is open, close it by sending ESC to all popups
-    tmux display-popup -C
+# Try to close any existing popup first
+# If successful, a popup was open and we've closed it, so exit
+if tmux display-popup -C 2>/dev/null; then
     exit 0
 fi
 
-# No popup open, launch it
+# No popup was open, so launch it
 POPUP_WIDTH="80%"
 POPUP_HEIGHT="80%"
 
