@@ -8,7 +8,7 @@
 #     Ctrl-S: Sort options
 #     Ctrl-F: Filter options
 #     Ctrl-X: Mark all as seen (reset change baseline)
-#     Ctrl-M: Mark selected PR as seen
+#     Ctrl-D: Mark selected PR as seen
 #     Ctrl-E: Edit watched repos
 #     Ctrl-U: Edit watched users/contributors
 #     Ctrl-O: Settings (age, cache TTL, refresh interval)
@@ -319,7 +319,7 @@ while true; do
         CHANGES_INDICATOR=""
     fi
     HEADER="Sort: $SORT_BY ($SORT_ORDER) | Filter: status=${FILTER_STATUS:-all} repo=${FILTER_REPO:-all}${CHANGES_INDICATOR}"
-    HEADER="$HEADER | ^S:Sort ^F:Filter ^R:Refresh ^M:MarkSeen ^X:MarkAllSeen ^O:Settings ^E:Repos ^U:Users"
+    HEADER="$HEADER | ^S:Sort ^F:Filter ^R:Refresh ^D:MarkSeen ^X:MarkAllSeen ^O:Settings ^E:Repos ^U:Users"
 
     # Determine which columns to show based on whether Jira is present
     if [[ "$HAS_JIRA" == "true" ]]; then
@@ -344,7 +344,7 @@ while true; do
         --with-nth="$FZF_WITH_NTH" \
         --bind="ctrl-r:execute-silent(rm -rf $CACHE_DIR/* && touch $REFRESH_MARKER)+abort" \
         --bind="ctrl-x:execute-silent($SCRIPT_DIR/pr-cache-refresh --reset && touch $RESET_MARKER)+abort" \
-        --bind="ctrl-m:execute-silent(echo {} | cut -d'│' -f\$((PR_NUM_FIELD + 1)) > $MARK_SEEN_MARKER)+abort" \
+        --bind="ctrl-d:execute-silent(echo {} | cut -d'│' -f\$((PR_NUM_FIELD + 1)) > $MARK_SEEN_MARKER)+abort" \
         --bind="ctrl-s:execute(bash -c \"$SCRIPT_DIR/.pr-sort-menu $SORT_BY $SORT_ORDER > $SORT_MARKER\")+abort" \
         --bind="ctrl-f:execute(bash -c \"$SCRIPT_DIR/.pr-filter-menu '$FILTER_STATUS' '$FILTER_REPO' ${REPOS[*]} > $FILTER_MARKER\")+abort" \
         --bind="ctrl-o:execute(bash -c \"$SCRIPT_DIR/.pr-settings-menu > $SETTINGS_MARKER\")+abort" \
