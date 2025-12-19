@@ -1,0 +1,21 @@
+#!/bin/bash
+
+# Tmux popup wrapper for pr-select
+# Usage: pr-popup [pr-select options...]
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Check if we're in tmux
+if [[ -z "$TMUX" ]]; then
+    # Not in tmux, just run pr-select directly
+    exec "$SCRIPT_DIR/pr-select" "$@"
+fi
+
+# We're in tmux, show in popup
+# Calculate popup size (80% of window)
+POPUP_WIDTH="80%"
+POPUP_HEIGHT="80%"
+
+# Run pr-select in tmux popup
+tmux display-popup -E -w "$POPUP_WIDTH" -h "$POPUP_HEIGHT" \
+    "$SCRIPT_DIR/pr-select $*"
