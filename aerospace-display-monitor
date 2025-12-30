@@ -30,6 +30,10 @@ HOW IT WORKS
       When a change is detected (display added/removed or resolution changed),
       it runs 'aerospace reload-config' to re-layout windows for the new
       display configuration.
+
+      Additionally, the script periodically cleans up ghost windows (windows
+      with empty titles) that can cause layout issues. This prevents the
+      jarring experience of having invisible windows take up screen space.
 "
 
 # Parse arguments
@@ -59,6 +63,18 @@ log() {
 	echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
 }
 
+# Function to clean up ghost windows (windows with empty titles)
+cleanup_ghost_windows() {
+	local ghost_count=$(aerospace list-windows --all --json 2>/dev/null | jq -r '.[] | select(."window-title"=="") | ."window-id"' | wc -l | tr -d ' ')
+
+	if [[ "$ghost_count" -gt 0 ]]; then
+		log "Found $ghost_count ghost window(s), cleaning up..."
+		aerospace list-windows --all --json 2>/dev/null | jq -r '.[] | select(."window-title"=="") | ."window-id"' | xargs -n1 aerospace close --window-id 2>/dev/null
+		return 0
+	fi
+	return 1
+}
+
 # Function to get current display configuration
 # Combines system_profiler data with actual scaled resolution from AppleScript
 get_display_config() {
@@ -77,13 +93,20 @@ log "AeroSpace display monitor started"
 # Get initial display configuration
 previous_config=$(get_display_config)
 
+# Counter for ghost cleanup (run every 5 iterations = ~10 seconds)
+cleanup_counter=0
+
 # Monitor for display changes (check every 2 seconds)
 while true; do
 	sleep 2
+	cleanup_counter=$((cleanup_counter + 1))
 
+	# Check for display configuration changes
 	current_config=$(get_display_config)
+	config_changed=false
 
 	if [[ "$current_config" != "$previous_config" ]]; then
+		config_changed=true
 		log "Display configuration changed"
 		log "Old config: $previous_config"
 		log "New config: $current_config"
@@ -97,5 +120,15 @@ while true; do
 		fi
 
 		previous_config="$current_config"
+	fi
+
+	# Clean up ghost windows periodically (every ~10 seconds) or after config changes
+	if [[ "$cleanup_counter" -ge 5 ]] || [[ "$config_changed" == true ]]; then
+		if cleanup_ghost_windows; then
+			# If we cleaned up ghosts, balance the layout
+			log "Balancing window sizes..."
+			aerospace balance-sizes 2>/dev/null
+		fi
+		cleanup_counter=0
 	fi
 done
