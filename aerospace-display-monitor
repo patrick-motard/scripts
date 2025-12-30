@@ -1,0 +1,101 @@
+#!/usr/bin/env zsh
+
+usage="NAME
+      aerospace-display-monitor - Monitor display changes and reload AeroSpace configuration
+
+SYNOPSIS
+      aerospace-display-monitor [-h]
+
+DESCRIPTION
+      Monitors macOS display configuration changes and automatically reloads
+      AeroSpace window manager configuration when displays are connected,
+      disconnected, or resolution changes occur. This ensures windows are
+      properly positioned after switching between external monitors and
+      laptop screen.
+
+      This script is designed to run as a LaunchAgent daemon process.
+
+ARGUMENTS
+      -h, --help     Show this help message
+
+EXAMPLES
+      # Run manually (will run indefinitely)
+      aerospace-display-monitor
+
+      # Run via LaunchAgent (recommended)
+      # See dotfiles ansible/tasks/aerospace.yml for setup
+
+HOW IT WORKS
+      The script uses system_profiler to monitor display configuration changes.
+      When a change is detected (display added/removed or resolution changed),
+      it runs 'aerospace reload-config' to re-layout windows for the new
+      display configuration.
+"
+
+# Parse arguments
+while test $# -gt 0; do
+	case "$1" in
+	-h | --help | -\?)
+		echo "$usage" >&2
+		exit 0
+		;;
+	*)
+		echo "Unknown option: $1" >&2
+		echo "$usage" >&2
+		exit 1
+		;;
+	esac
+	shift
+done
+
+# Check if aerospace is installed
+if ! command -v aerospace &> /dev/null; then
+	echo "Error: aerospace command not found. Is AeroSpace installed?" >&2
+	exit 1
+fi
+
+# Log function
+log() {
+	echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+}
+
+# Function to get current display configuration
+# Combines system_profiler data with actual scaled resolution from AppleScript
+get_display_config() {
+	# Get basic display info (detects physical display changes)
+	local display_info=$(system_profiler SPDisplaysDataType 2>/dev/null | grep -E "(Resolution|Display Type|Online|Main Display)" | sort)
+
+	# Get actual scaled resolution that applications see (detects scaling changes)
+	local scaled_res=$(osascript -e 'tell application "Finder" to get bounds of window of desktop' 2>/dev/null)
+
+	# Combine both for complete detection
+	echo "${display_info}|${scaled_res}"
+}
+
+log "AeroSpace display monitor started"
+
+# Get initial display configuration
+previous_config=$(get_display_config)
+
+# Monitor for display changes (check every 2 seconds)
+while true; do
+	sleep 2
+
+	current_config=$(get_display_config)
+
+	if [[ "$current_config" != "$previous_config" ]]; then
+		log "Display configuration changed"
+		log "Old config: $previous_config"
+		log "New config: $current_config"
+		log "Reloading AeroSpace..."
+
+		# Reload AeroSpace configuration
+		if aerospace reload-config; then
+			log "AeroSpace configuration reloaded successfully"
+		else
+			log "Warning: AeroSpace reload-config failed with exit code $?"
+		fi
+
+		previous_config="$current_config"
+	fi
+done
