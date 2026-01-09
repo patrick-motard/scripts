@@ -255,7 +255,7 @@ function brewi() {
       # Sort the package list (using perl for portability - asort requires gawk)
       perl -0777 -pe '
         s/(- homebrew:\n    name:\n)((?:      - .+\n)+)(    state: present)/
-          $1 . join("", sort split(\/\n\/, $2)) . "\n" . $3/e
+          $1 . join("\n", sort grep { length } split(\/\n\/, $2)) . "\n" . $3/e
       ' "$ansible_file" > "$ansible_file.tmp" && mv "$ansible_file.tmp" "$ansible_file" || rm -f "$ansible_file.tmp"
 
       # Commit and push
@@ -311,7 +311,7 @@ function brewci() {
       # Sort the cask list (using perl for portability - asort requires gawk)
       perl -0777 -pe '
         s/(- homebrew_cask:\n    state: present\n    name:\n)((?:      - .+\n)+)/
-          $1 . join("", sort split(\/\n\/, $2)) . "\n"/e
+          $1 . join("\n", sort grep { length } split(\/\n\/, $2)) . "\n"/e
       ' "$ansible_file" > "$ansible_file.tmp" && mv "$ansible_file.tmp" "$ansible_file" || rm -f "$ansible_file.tmp"
 
       # Commit and push
@@ -546,7 +546,7 @@ function brewtap() {
       # Sort the tap list
       perl -0777 -pe '
         s/(- name: Add Homebrew taps\n  homebrew_tap:\n    name:\n)((?:      - .+\n)+)(    state: present)/
-          $1 . join("", sort split(\/\n\/, $2)) . "\n" . $3/e
+          $1 . join("\n", sort grep { length } split(\/\n\/, $2)) . "\n" . $3/e
       ' "$ansible_file" > "$ansible_file.tmp" && mv "$ansible_file.tmp" "$ansible_file" || rm -f "$ansible_file.tmp"
 
       # Commit and push

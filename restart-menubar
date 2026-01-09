@@ -1,0 +1,23 @@
+#!/usr/bin/env zsh
+
+usage="NAME
+    restart-menubar - Restart the macOS menu bar
+
+SYNOPSIS
+    restart-menubar
+
+DESCRIPTION
+    Restarts the macOS menu bar by killing the SystemUIServer process.
+    The system automatically restarts it immediately.
+
+EXAMPLES
+    restart-menubar
+        Restart the menu bar
+"
+
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    echo "$usage"
+    exit 0
+fi
+
+killall SystemUIServer
