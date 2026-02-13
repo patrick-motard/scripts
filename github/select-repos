@@ -101,37 +101,100 @@ if [[ ! -s "$REPOS_LIST" ]]; then
 fi
 
 # Load existing selections if any
-EXISTING_SELECTIONS=""
+EXISTING_REPOS=()
 if [[ -f "$CONFIG_FILE" ]]; then
-    EXISTING_SELECTIONS=$(cat "$CONFIG_FILE" | tr '\n' '|' | sed 's/|$//')
+    while IFS= read -r repo; do
+        [[ -n "$repo" ]] && EXISTING_REPOS+=("$repo")
+    done < "$CONFIG_FILE"
 fi
 
-# Format for fzf display and pre-select existing
+# Format for fzf display
 # Sort by date descending, remove duplicates
 FORMATTED=$(sort -t$'\t' -k2 -r "$REPOS_LIST" | awk -F'\t' '!seen[$1]++' | \
     awk -F'\t' '{printf "%-45s %s  %s\n", $1, $2, $3}')
 
 rm -f "$REPOS_LIST"
 
+# Separate already-selected repos from new ones
+# Selected repos go first (will be pre-selected in fzf)
+# Add visual marker [*] to already-selected repos
+ALREADY_SELECTED=""
+NOT_SELECTED=""
+while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    repo=$(echo "$line" | awk '{print $1}')
+    is_selected=false
+    for existing in "${EXISTING_REPOS[@]}"; do
+        if [[ "$repo" == "$existing" ]]; then
+            is_selected=true
+            break
+        fi
+    done
+    if $is_selected; then
+        ALREADY_SELECTED+="[*] $line"$'\n'
+    else
+        NOT_SELECTED+="    $line"$'\n'
+    fi
+done <<< "$FORMATTED"
+
+# Remove trailing newline from ALREADY_SELECTED
+ALREADY_SELECTED="${ALREADY_SELECTED%$'\n'}"
+
+# Count selected repos for fzf toggle command
+SELECTED_COUNT=0
+if [[ -n "$ALREADY_SELECTED" ]]; then
+    SELECTED_COUNT=$(echo "$ALREADY_SELECTED" | wc -l | xargs)
+fi
+
+# Combine: selected first, then not selected
+if [[ -n "$ALREADY_SELECTED" ]] && [[ -n "$NOT_SELECTED" ]]; then
+    COMBINED="${ALREADY_SELECTED}"$'\n'"${NOT_SELECTED}"
+elif [[ -n "$ALREADY_SELECTED" ]]; then
+    COMBINED="$ALREADY_SELECTED"
+else
+    COMBINED="$NOT_SELECTED"
+fi
+# Remove trailing newline
+COMBINED="${COMBINED%$'\n'}"
+
 echo "" >&2
 echo "Select repos to watch for PRs (TAB to select, ENTER to confirm):" >&2
+echo "[*] = currently selected" >&2
+
+# Build fzf bind command to pre-select first N items (the already-selected ones)
+FZF_LOAD_BIND=""
+if [[ "$SELECTED_COUNT" -gt 0 ]]; then
+    # Build a command like "toggle+down+toggle+down+..." then move back to top
+    TOGGLE_CMDS=""
+    for ((i=0; i<SELECTED_COUNT; i++)); do
+        TOGGLE_CMDS+="toggle+down+"
+    done
+    # Remove trailing + and add first to go back to top
+    TOGGLE_CMDS="${TOGGLE_CMDS%+}+first"
+    FZF_LOAD_BIND="--bind=load:${TOGGLE_CMDS}"
+fi
 
 # Use fzf for multi-select
-SELECTED=$(echo "$FORMATTED" | fzf \
+SELECTED=$(echo "$COMBINED" | fzf \
     --multi \
-    --header="TAB: select | ENTER: confirm | ESC: cancel" \
+    --header="TAB: toggle | ENTER: confirm | ESC: cancel | [*] = currently selected" \
     --prompt="Select repos > " \
     --preview-window=hidden \
     --bind="ctrl-a:select-all" \
-    --bind="ctrl-d:deselect-all")
+    --bind="ctrl-d:deselect-all" \
+    $FZF_LOAD_BIND)
 
 if [[ -z "$SELECTED" ]]; then
     echo "No repos selected, keeping existing config" >&2
     exit 0
 fi
 
-# Extract just repo names (first column)
-SELECTED_REPOS=$(echo "$SELECTED" | awk '{print $1}')
+# Extract just repo names (skip the [*] or spaces prefix, get actual repo name)
+# Format is: "[*] repo-name" or "    repo-name"
+SELECTED_REPOS=$(echo "$SELECTED" | awk '{
+    if ($1 == "[*]") print $2
+    else print $1
+}')
 
 # Save to config file
 mkdir -p "$CONFIG_DIR"
