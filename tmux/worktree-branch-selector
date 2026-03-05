@@ -5,13 +5,35 @@
 set -e
 
 WORKTREE_DIR="${WORKTREE_DIR:-$HOME/code/worktrees}"
+CONFIG_FILE="${WORKTREE_CONFIG:-$HOME/.config/worktree-selector/repos.yml}"
 
-# Find all bare repos (directories containing a .git directory)
-repos=$(fd -t d -d 1 . "$WORKTREE_DIR" 2>/dev/null | sed "s|$WORKTREE_DIR/||" | sort)
+# Read repos from config file
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "Config file not found: $CONFIG_FILE"
+    echo ""
+    echo "Create this file with a list of repos to manage as worktrees."
+    echo "Example format (YAML array):"
+    echo ""
+    echo "repos:"
+    echo "  - growth-engine"
+    echo "  - my-other-repo"
+    echo ""
+    exit 1
+fi
+
+# Parse YAML config (simple array format)
+# Extracts lines that start with '  -' and removes the prefix
+repos=$(grep "^  - " "$CONFIG_FILE" | sed 's/^  - //' | sort)
 
 if [[ -z "$repos" ]]; then
-    echo "No repos found in $WORKTREE_DIR"
-    echo "Use gwt-clone to clone a repo for worktree management"
+    echo "No repos configured in $CONFIG_FILE"
+    echo ""
+    echo "Add repos to the file in YAML array format:"
+    echo ""
+    echo "repos:"
+    echo "  - growth-engine"
+    echo "  - my-other-repo"
+    echo ""
     exit 1
 fi
 
@@ -101,6 +123,14 @@ if [[ ! -d "$worktree_path" ]]; then
     fi
 
     echo "✓ Created worktree at $worktree_path"
+
+    # Step 4.5: Run repo-specific setup hook if it exists
+    # This allows private/company-specific configuration without modifying this script
+    setup_hook="$HOME/code/scripts-private/bin/worktree-setup-${repo}"
+    if [[ -x "$setup_hook" ]]; then
+        echo "Running setup hook for $repo..."
+        "$setup_hook" "$worktree_path" "$branch"
+    fi
 fi
 
 # Step 5: Create/attach tmux session
