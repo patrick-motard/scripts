@@ -1,0 +1,128 @@
+#!/usr/bin/env zsh
+# Worktree Branch Selector
+# Select a repo, then a branch, create worktree if needed, start tmux session
+
+set -e
+
+WORKTREE_DIR="${WORKTREE_DIR:-$HOME/code/worktrees}"
+
+# Find all bare repos (directories containing a .git directory)
+repos=$(fd -t d -d 1 . "$WORKTREE_DIR" 2>/dev/null | sed "s|$WORKTREE_DIR/||" | sort)
+
+if [[ -z "$repos" ]]; then
+    echo "No repos found in $WORKTREE_DIR"
+    echo "Use gwt-clone to clone a repo for worktree management"
+    exit 1
+fi
+
+# Step 1: Select a repo
+repo=$(echo "$repos" | fzf \
+    --prompt="Select repo> " \
+    --border-label=" Select Repository " \
+    --height=50% \
+    --reverse \
+    --ansi)
+
+if [[ -z "$repo" ]]; then
+    exit 0
+fi
+
+repo_path="$WORKTREE_DIR/$repo"
+git_dir="$repo_path/.git"
+
+if [[ ! -d "$git_dir" ]]; then
+    echo "Error: $git_dir not found"
+    exit 1
+fi
+
+# Fetch latest branches (but don't show output unless there's an error)
+git --git-dir="$git_dir" fetch --quiet 2>&1 | grep -v "From\|^\*" || true
+
+# Step 2: List all branches (local and remote, deduplicated)
+# Exclude branches ending in -deploy
+branches=$(git --git-dir="$git_dir" branch -a --format='%(refname:short)' | \
+    sed 's|^origin/||' | \
+    sort -u | \
+    grep -v '^HEAD$' | \
+    grep -v '\-deploy$')
+
+if [[ -z "$branches" ]]; then
+    echo "No branches found in $repo"
+    exit 1
+fi
+
+# Show existing worktrees for context
+existing_worktrees=$(git --git-dir="$git_dir" worktree list --porcelain | \
+    grep "^worktree" | \
+    sed "s|worktree $repo_path/||" | \
+    tail -n +2)
+
+# Step 3: Select a branch
+# Mark existing worktrees with a checkmark
+branch=$(echo "$branches" | while read -r b; do
+    if echo "$existing_worktrees" | grep -q "^$b$"; then
+        echo "✓ $b"
+    else
+        echo "  $b"
+    fi
+done | fzf \
+    --prompt="Select branch> " \
+    --border-label=" $repo - Select Branch " \
+    --height=50% \
+    --reverse \
+    --ansi \
+    --header="✓ = worktree exists" | \
+    sed 's/^[✓ ]*//')
+
+if [[ -z "$branch" ]]; then
+    exit 0
+fi
+
+worktree_path="$repo_path/$branch"
+
+# Step 4: Create worktree if it doesn't exist
+if [[ ! -d "$worktree_path" ]]; then
+    echo "Creating worktree for $branch..."
+
+    # Check if branch exists locally or remotely
+    if git --git-dir="$git_dir" show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+        # Local branch exists
+        git --git-dir="$git_dir" worktree add "$worktree_path" "$branch"
+    elif git --git-dir="$git_dir" show-ref --verify --quiet "refs/remotes/origin/$branch" 2>/dev/null; then
+        # Remote branch exists, check it out
+        git --git-dir="$git_dir" worktree add "$worktree_path" "$branch"
+    else
+        # New branch, create from HEAD of default branch
+        default_branch=$(git --git-dir="$git_dir" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||')
+        if [[ -z "$default_branch" ]]; then
+            default_branch="main"
+        fi
+        git --git-dir="$git_dir" worktree add -b "$branch" "$worktree_path" "$default_branch"
+    fi
+
+    echo "✓ Created worktree at $worktree_path"
+fi
+
+# Step 5: Create/attach tmux session
+# Session name format: repo-wt-branch (sanitize for tmux)
+session_name="${repo}-wt-${branch}"
+# Replace invalid tmux session name characters
+session_name=$(echo "$session_name" | tr './:' '-')
+
+# Check if we're in tmux
+if [[ -n "$TMUX" ]]; then
+    # In tmux - switch to or create session
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        tmux switch-client -t "$session_name"
+    else
+        tmux new-session -d -s "$session_name" -c "$worktree_path"
+        tmux switch-client -t "$session_name"
+    fi
+else
+    # Not in tmux - attach or create
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        tmux attach -t "$session_name"
+    else
+        tmux new-session -s "$session_name" -c "$worktree_path"
+    fi
+fi
