@@ -1,0 +1,146 @@
+#!/bin/bash
+
+# Fetch Jira tickets for the current user
+# Usage: fetch-jira-tickets [--all-projects] [--format json|text]
+# Returns tickets as JSON or formatted text
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_DIR="${HOME}/.config/jira-select"
+CONFIG_FILE="${CONFIG_DIR}/config.yml"
+PROJECTS_FILE="${CONFIG_DIR}/projects.txt"
+CACHE_DIR="${HOME}/.cache/jira-tickets"
+
+mkdir -p "$CACHE_DIR" "$CONFIG_DIR"
+
+# Parse arguments
+FORMAT="json"
+SCOPE="my"  # "my" or "all"
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --all-projects)
+            SCOPE="all"
+            shift
+            ;;
+        --format)
+            FORMAT="$2"
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# Check if config exists
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "Jira config not found. Creating default config at $CONFIG_FILE" >&2
+    cat > "$CONFIG_FILE" <<EOF
+# Jira Ticket Selector Configuration
+
+# Your Jira username (email)
+username: user@example.com
+
+# Cache TTL in minutes
+cache_ttl_minutes: 30
+EOF
+    echo "Please edit $CONFIG_FILE with your Jira username" >&2
+    exit 1
+fi
+
+# Check if projects are configured
+if [[ ! -f "$PROJECTS_FILE" ]] || [[ ! -s "$PROJECTS_FILE" ]]; then
+    echo "No Jira projects configured." >&2
+    echo "Please create $PROJECTS_FILE with one project key per line" >&2
+    echo "Example:" >&2
+    echo "  ZEN" >&2
+    echo "  GROWTH" >&2
+    exit 1
+fi
+
+# Read config
+USERNAME=$(grep "^username:" "$CONFIG_FILE" | cut -d':' -f2- | xargs)
+CACHE_TTL_MINUTES=$(grep "^cache_ttl_minutes:" "$CONFIG_FILE" | cut -d':' -f2- | xargs)
+CACHE_TTL_MINUTES=${CACHE_TTL_MINUTES:-30}
+
+if [[ -z "$USERNAME" ]] || [[ "$USERNAME" == "user@example.com" ]]; then
+    echo "Please configure your Jira username in $CONFIG_FILE" >&2
+    exit 1
+fi
+
+# Read projects
+PROJECTS=($(cat "$PROJECTS_FILE"))
+
+if [[ ${#PROJECTS[@]} -eq 0 ]]; then
+    echo "No projects configured in $PROJECTS_FILE" >&2
+    exit 1
+fi
+
+# Build cache key
+CACHE_KEY="${SCOPE}-$(echo "${PROJECTS[@]}" | tr ' ' '-')"
+CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
+
+# Check cache
+if [[ -f "$CACHE_FILE" ]]; then
+    CACHE_AGE=$(($(date +%s) - $(stat -f %m "$CACHE_FILE" 2>/dev/null || stat -c %Y "$CACHE_FILE")))
+    CACHE_TTL_SECONDS=$((CACHE_TTL_MINUTES * 60))
+
+    if [[ $CACHE_AGE -lt $CACHE_TTL_SECONDS ]]; then
+        # Cache is fresh
+        if [[ "$FORMAT" == "json" ]]; then
+            cat "$CACHE_FILE"
+        else
+            jq -r '.[] | "\(.key)|\(.fields.summary)|\(.fields.status.name)|\(.fields.assignee.displayName // "Unassigned")"' "$CACHE_FILE"
+        fi
+        exit 0
+    fi
+fi
+
+# Fetch tickets using Claude's Jira MCP tools
+# Build JQL based on scope
+if [[ "$SCOPE" == "my" ]]; then
+    # My assigned tickets
+    PROJECT_JQL=$(printf "project = %s" "${PROJECTS[0]}")
+    for ((i=1; i<${#PROJECTS[@]}; i++)); do
+        PROJECT_JQL="$PROJECT_JQL OR project = ${PROJECTS[i]}"
+    done
+    JQL="($PROJECT_JQL) AND assignee = currentUser() AND status != Done AND status != Closed"
+else
+    # All tickets in projects
+    PROJECT_JQL=$(printf "project = %s" "${PROJECTS[0]}")
+    for ((i=1; i<${#PROJECTS[@]}; i++)); do
+        PROJECT_JQL="$PROJECT_JQL OR project = ${PROJECTS[i]}"
+    done
+    JQL="($PROJECT_JQL) AND status != Done AND status != Closed"
+fi
+
+echo "Fetching Jira tickets..." >&2
+echo "JQL: $JQL" >&2
+
+# This will be called by Claude which has access to Jira MCP tools
+# For now, create a placeholder that can be replaced with actual MCP calls
+echo "[]" > "$CACHE_FILE"
+
+# TODO: Replace with actual Jira MCP call via Claude
+# The format should be:
+# [
+#   {
+#     "key": "ZEN-1234",
+#     "fields": {
+#       "summary": "Ticket title",
+#       "status": {"name": "In Progress"},
+#       "assignee": {"displayName": "John Doe", "emailAddress": "john@example.com"},
+#       "priority": {"name": "High"},
+#       "issuetype": {"name": "Story"},
+#       "created": "2024-01-01T00:00:00.000+0000",
+#       "updated": "2024-01-02T00:00:00.000+0000"
+#     }
+#   }
+# ]
+
+if [[ "$FORMAT" == "json" ]]; then
+    cat "$CACHE_FILE"
+else
+    jq -r '.[] | "\(.key)|\(.fields.summary)|\(.fields.status.name)|\(.fields.assignee.displayName // "Unassigned")"' "$CACHE_FILE"
+fi
