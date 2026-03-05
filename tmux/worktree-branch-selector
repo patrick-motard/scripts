@@ -126,7 +126,7 @@ if [[ ! -d "$worktree_path" ]]; then
 
     # Step 4.5: Run repo-specific setup hook if it exists
     # This allows private/company-specific configuration without modifying this script
-    setup_hook="$HOME/code/scripts-private/bin/worktree-setup-${repo}"
+    setup_hook="$HOME/code/scripts-private/worktree-setup-${repo}"
     if [[ -x "$setup_hook" ]]; then
         echo "Running setup hook for $repo..."
         "$setup_hook" "$worktree_path" "$branch"
