@@ -465,15 +465,21 @@ else
     PR_JIRA_URL=""
 fi
 
+# Extract head branch name from PR JSON
+PR_BRANCH=$(echo "$PR_JSON" | jq -r --arg url "$PR_URL" '.[] | select(.url == $url) | .headRefName // ""')
+
+# Extract full repo path (org/repo) from URL
+PR_FULL_REPO=$(echo "$PR_JSON" | jq -r --arg url "$PR_URL" '.[] | select(.url == $url) | .fullRepo // ""')
+
 # Build action menu dynamically based on whether Jira exists
 if [[ -n "$PR_JIRA_URL" ]]; then
-    ACTION=$(printf "Open PR in browser\nOpen Jira in browser\nCopy PR URL\nCopy Jira URL\nCopy title\nCancel" | fzf \
+    ACTION=$(printf "Open PR in browser\nOpen Jira in browser\nCreate worktree for this PR\nCopy PR URL\nCopy Jira URL\nCopy title\nCancel" | fzf \
         --header="What would you like to do?" \
-        --height=10)
+        --height=11)
 else
-    ACTION=$(printf "Open PR in browser\nCopy PR URL\nCopy title\nCancel" | fzf \
+    ACTION=$(printf "Open PR in browser\nCreate worktree for this PR\nCopy PR URL\nCopy title\nCancel" | fzf \
         --header="What would you like to do?" \
-        --height=8)
+        --height=9)
 fi
 
 case "$ACTION" in
@@ -522,6 +528,35 @@ case "$ACTION" in
         fi
         echo -n "$PR_TITLE" | eval "$CLIP_CMD"
         echo "Copied title to clipboard: $PR_TITLE"
+        ;;
+    "Create worktree for this PR")
+        # Source worktree helpers
+        source "$SCRIPT_DIR/.worktree-helpers"
+
+        if [[ -z "$PR_BRANCH" ]]; then
+            echo "Error: Could not determine PR branch name" >&2
+            exit 1
+        fi
+
+        if [[ -z "$PR_FULL_REPO" ]]; then
+            echo "Error: Could not determine full repo path" >&2
+            exit 1
+        fi
+
+        # Extract repo name from full path
+        REPO_NAME="${PR_FULL_REPO#*/}"
+
+        echo "Creating worktree for PR #$PR_NUMBER: $PR_BRANCH"
+        echo "Repo: $REPO_NAME"
+        echo ""
+
+        if create_worktree "$REPO_NAME" "$PR_BRANCH"; then
+            run_setup_hook "$REPO_NAME" "$WORKTREE_PATH" "$PR_BRANCH"
+            create_tmux_session "$REPO_NAME" "$PR_BRANCH" "$WORKTREE_PATH"
+        else
+            echo "Failed to create worktree" >&2
+            exit 1
+        fi
         ;;
     "Cancel"|"")
         echo "Cancelled"

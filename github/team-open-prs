@@ -191,7 +191,7 @@ if [[ "$FORMAT" == "json" ]]; then
         (
             echo "  - ${REPO_SHORT}..." >&2
             gh pr list --repo "$REPO" --state open --search "created:>=$DATE_FILTER" \
-                --json author,createdAt,title,number,url,isDraft,labels 2>/dev/null | \
+                --json author,createdAt,title,number,url,isDraft,labels,headRefName 2>/dev/null | \
                 jq -c ".[] | select($JQ_FILTER) | . + {repo: \"$REPO_SHORT\", fullRepo: \"$REPO\"}" > "$TEMP_DIR/${REPO_SHORT}.json"
         ) &
     done
@@ -223,7 +223,7 @@ if [[ "$FORMAT" == "json" ]]; then
             (
                 echo "  [$COUNT/$TOTAL_PRS] ${REPO}#${PR_NUM}..." >&2
                 # Get full PR details and merge with list data, extract Jira ticket
-                gh pr view "$PR_URL" --json state,updatedAt,comments,body,reviews 2>/dev/null | \
+                gh pr view "$PR_URL" --json state,updatedAt,comments,body,reviews,headRefName 2>/dev/null | \
                     jq -c ". + $(echo "$pr") |
                         .jiraTicket = (if .body then ((.body | match(\"https://zendesk\\\\.atlassian\\\\.net/browse/(?<ticket>[A-Z]+-[0-9]+)\") | .captures[0].string) // null) else null end) |
                         .jiraUrl = (if .jiraTicket then \"https://zendesk.atlassian.net/browse/\" + .jiraTicket else null end)" \
