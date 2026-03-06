@@ -10,11 +10,18 @@
 #   repos: space-separated list of repos in format "org/repo" (default: reads from active repos)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_DIR="${HOME}/.config/gh-pr-select"
 FORMAT="markdown"
 DAYS_BACK=30
 USERS=()
 USE_CACHE=true
 CACHE_TTL=300  # 5 minutes
+
+# Read Jira base URL from config if available
+JIRA_BASE_URL=""
+if [[ -f "$CONFIG_DIR/config.yml" ]]; then
+    JIRA_BASE_URL=$(grep "^jira_base_url:" "$CONFIG_DIR/config.yml" | cut -d':' -f2- | xargs)
+fi
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -217,10 +224,21 @@ if [[ "$FORMAT" == "json" ]]; then
 
             (
                 echo "  [$COUNT/$TOTAL_PRS] ${REPO}#${PR_NUM}..." >&2
-                # Get full PR details and merge with list data
-                gh pr view "$PR_URL" --json state,updatedAt,comments,body,reviews,headRefName 2>/dev/null | \
-                    jq -c ". + $(echo "$pr")" \
-                    > "$DETAILS_DIR/pr-${COUNT}.json"
+                # Get full PR details and merge with list data, optionally extract Jira ticket
+                if [[ -n "$JIRA_BASE_URL" ]]; then
+                    # Extract Jira ticket if base URL is configured
+                    JIRA_PATTERN=$(echo "$JIRA_BASE_URL" | sed 's/[\/&]/\\&/g')
+                    gh pr view "$PR_URL" --json state,updatedAt,comments,body,reviews,headRefName 2>/dev/null | \
+                        jq -c --arg jira_base "$JIRA_BASE_URL" ". + $(echo "$pr") |
+                            .jiraTicket = (if .body then ((.body | match(\$jira_base + \"/browse/(?<ticket>[A-Z]+-[0-9]+)\") | .captures[0].string) // null) else null end) |
+                            .jiraUrl = (if .jiraTicket then (\$jira_base + \"/browse/\" + .jiraTicket) else null end)" \
+                        > "$DETAILS_DIR/pr-${COUNT}.json"
+                else
+                    # No Jira extraction
+                    gh pr view "$PR_URL" --json state,updatedAt,comments,body,reviews,headRefName 2>/dev/null | \
+                        jq -c ". + $(echo "$pr")" \
+                        > "$DETAILS_DIR/pr-${COUNT}.json"
+                fi
             ) &
 
             # Limit to 8 concurrent fetches
