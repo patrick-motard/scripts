@@ -118,31 +118,50 @@ fi
 echo "Fetching Jira tickets..." >&2
 echo "JQL: $JQL" >&2
 
-# Create a marker file to signal Claude to fetch tickets
-FETCH_MARKER="${CACHE_DIR}/fetch-request-$$.txt"
-cat > "$FETCH_MARKER" <<EOF
-CLAUDE: Please use the Jira MCP tools to fetch these tickets.
-
-Run: mcp__atlassian-mcp__jira_search
-Parameters:
-  jql: "$JQL"
-  fields: "summary,status,assignee,priority,issuetype,created,updated,project"
-  limit: 100
-
-Then save the result JSON to: $CACHE_FILE
-
-The JSON should be an array of issue objects from the Jira API.
-After saving, delete this marker file: $FETCH_MARKER
-EOF
-
-# If being run by Claude, it will see the marker and execute the MCP call
-# If being run by user directly, show instructions
-if [[ -f "$FETCH_MARKER" ]]; then
+# Use ACLI (Atlassian CLI) to fetch tickets directly
+if ! command -v acli &> /dev/null; then
+    echo "Error: 'acli' CLI not found." >&2
+    echo "Install ACLI: https://developer.atlassian.com/cloud/acli/" >&2
+    echo "Or use: brew tap atlassian/tap && brew install acli" >&2
     echo "" >&2
-    echo "=== Claude Integration Required ===" >&2
-    echo "This script requires Claude to fetch Jira data using MCP tools." >&2
-    echo "Please run this command through Claude, or see: $FETCH_MARKER" >&2
-    echo "" >&2
+    echo "[]"
+    exit 0
+fi
+
+# Fetch tickets using acli
+# Note: acli only supports specific fields - using default fields which include:
+# key, summary, status, assignee, priority, issuetype
+JIRA_JSON=$(acli jira workitem search \
+    --jql "$JQL" \
+    --json \
+    2>&1)
+
+if [[ $? -ne 0 ]]; then
+    echo "Error: Failed to fetch Jira tickets" >&2
+    echo "$JIRA_JSON" >&2
+    echo "[]"
+    exit 0
+fi
+
+# Transform acli output to expected format
+# Note: acli doesn't return created/updated timestamps, so we use current time as placeholder
+CURRENT_TIME=$(date -u +"%Y-%m-%dT%H:%M:%S.000%z")
+echo "$JIRA_JSON" | jq --arg now "$CURRENT_TIME" '[.[] | {
+    key: .key,
+    fields: {
+        summary: .fields.summary,
+        status: {name: .fields.status.name},
+        assignee: {displayName: (.fields.assignee.displayName // "Unassigned")},
+        priority: {name: (.fields.priority.name // "None")},
+        issuetype: {name: .fields.issuetype.name},
+        created: $now,
+        updated: $now,
+        project: {key: (.key | split("-")[0])}
+    }
+}]' > "$CACHE_FILE" 2>/dev/null
+
+if [[ ! -s "$CACHE_FILE" ]]; then
+    echo "Error: Failed to parse Jira output" >&2
     echo "[]"
     exit 0
 fi
