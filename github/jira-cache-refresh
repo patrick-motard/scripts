@@ -35,7 +35,7 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
 # Jira Ticket Selector Configuration
 
 # Your Jira username (email)
-username: $(whoami)@zendesk.com
+username: user@example.com
 
 # Cache TTL in minutes
 cache_ttl_minutes: 30

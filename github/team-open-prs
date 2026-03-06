@@ -105,12 +105,7 @@ if [[ ${#USERS[@]} -eq 0 ]]; then
     if [[ -f "$CONTRIBUTORS_CONFIG" ]] && [[ -s "$CONTRIBUTORS_CONFIG" ]]; then
         CONTRIBUTORS=$(cat "$CONTRIBUTORS_CONFIG")
     else
-        CONTRIBUTORS_FILE="$SCRIPT_DIR/growth-engine-contributors.yml"
-        if [[ -f "$CONTRIBUTORS_FILE" ]]; then
-            CONTRIBUTORS=$(grep -E '^\s*-\s+' "$CONTRIBUTORS_FILE" | sed 's/^[[:space:]]*-[[:space:]]*//')
-        else
-            CONTRIBUTORS=""
-        fi
+        CONTRIBUTORS=""
     fi
 else
     CONTRIBUTORS=$(printf "%s\n" "${USERS[@]}")
@@ -222,11 +217,9 @@ if [[ "$FORMAT" == "json" ]]; then
 
             (
                 echo "  [$COUNT/$TOTAL_PRS] ${REPO}#${PR_NUM}..." >&2
-                # Get full PR details and merge with list data, extract Jira ticket
+                # Get full PR details and merge with list data
                 gh pr view "$PR_URL" --json state,updatedAt,comments,body,reviews,headRefName 2>/dev/null | \
-                    jq -c ". + $(echo "$pr") |
-                        .jiraTicket = (if .body then ((.body | match(\"https://zendesk\\\\.atlassian\\\\.net/browse/(?<ticket>[A-Z]+-[0-9]+)\") | .captures[0].string) // null) else null end) |
-                        .jiraUrl = (if .jiraTicket then \"https://zendesk.atlassian.net/browse/\" + .jiraTicket else null end)" \
+                    jq -c ". + $(echo "$pr")" \
                     > "$DETAILS_DIR/pr-${COUNT}.json"
             ) &
 
