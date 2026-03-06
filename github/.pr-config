@@ -25,6 +25,10 @@ cache_ttl_minutes: 29
 # Background refresh interval in minutes (pr-cache-refresh)
 # Recommended: 10, 30, or 60
 refresh_interval_minutes: 30
+
+# Stale cache multiplier: serve stale cache if age < TTL * multiplier
+# while refreshing in background. Set to 0 to disable stale-while-revalidate.
+stale_threshold_multiplier: 3
 EOF
     fi
 }
@@ -55,7 +59,14 @@ set_config() {
 
     ensure_config
 
-    yq -i ".$key = $value" "$CONFIG_FILE"
+    # Quote string values for yq
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+        # Numeric value - don't quote
+        yq -i ".$key = $value" "$CONFIG_FILE"
+    else
+        # String value - quote it
+        yq -i ".$key = \"$value\"" "$CONFIG_FILE"
+    fi
 }
 
 # Convert minutes to seconds
