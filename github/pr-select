@@ -95,7 +95,9 @@ while true; do
     # Fetch PRs as JSON (show progress)
     echo "Loading PRs (age: ${AGE_DAYS}d, cache TTL: ${CACHE_TTL_MINUTES}m)..." >&2
     PR_JSON=$("$SCRIPT_DIR/team-open-prs" --format json --age "$AGE_DAYS" --cache-ttl "$CACHE_TTL_SECONDS" "$@" 2>&2)
-    echo "" >&2
+
+    # Clear screen before showing fzf menu
+    clear
 
     if [[ -z "$PR_JSON" ]] || [[ "$PR_JSON" == "[]" ]]; then
         # Show config menu instead of exiting
@@ -319,7 +321,7 @@ while true; do
         CHANGES_INDICATOR=""
     fi
     HEADER="Sort: $SORT_BY ($SORT_ORDER) | Filter: status=${FILTER_STATUS:-all} repo=${FILTER_REPO:-all}${CHANGES_INDICATOR}"
-    HEADER="$HEADER | ^S:Sort ^F:Filter ^R:Refresh ^D:MarkSeen ^X:MarkAllSeen ^O:Settings ^E:Repos ^U:Users"
+    HEADER="$HEADER | ^S:Sort ^F:Filter ^R:Refresh ^D:MarkSeen ^X:MarkAllSeen ^O:Settings ^E:Repos ^U:Users ^J:Jira"
 
     # Determine which columns to show based on whether Jira is present
     if [[ "$HAS_JIRA" == "true" ]]; then
@@ -350,6 +352,7 @@ while true; do
         --bind="ctrl-o:execute(bash -c \"$SCRIPT_DIR/.pr-settings-menu > $SETTINGS_MARKER\")+abort" \
         --bind="ctrl-e:execute($SCRIPT_DIR/select-repos)+execute-silent(rm -rf $CACHE_DIR/* && touch $REFRESH_MARKER)+abort" \
         --bind="ctrl-u:execute($SCRIPT_DIR/select-contributors)+execute-silent(rm -rf $CACHE_DIR/* && touch $REFRESH_MARKER)+abort" \
+        --bind="ctrl-j:execute($SCRIPT_DIR/jira-select)+abort" \
         --preview='
             PR_NUM=$(echo {} | cut -d"│" -f$PR_NUM_FIELD)
             PR_URL=$(echo {} | cut -d"│" -f$((PR_NUM_FIELD + 1)))
