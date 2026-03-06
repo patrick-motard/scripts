@@ -105,39 +105,54 @@ if [[ "$SCOPE" == "my" ]]; then
     for ((i=1; i<${#PROJECTS[@]}; i++)); do
         PROJECT_JQL="$PROJECT_JQL OR project = ${PROJECTS[i]}"
     done
-    JQL="($PROJECT_JQL) AND assignee = currentUser() AND status != Done AND status != Closed"
+    JQL="($PROJECT_JQL) AND assignee = currentUser() AND status != Done AND status != Closed AND status != Resolved"
 else
     # All tickets in projects
     PROJECT_JQL=$(printf "project = %s" "${PROJECTS[0]}")
     for ((i=1; i<${#PROJECTS[@]}; i++)); do
         PROJECT_JQL="$PROJECT_JQL OR project = ${PROJECTS[i]}"
     done
-    JQL="($PROJECT_JQL) AND status != Done AND status != Closed"
+    JQL="($PROJECT_JQL) AND status != Done AND status != Closed AND status != Resolved"
 fi
 
 echo "Fetching Jira tickets..." >&2
 echo "JQL: $JQL" >&2
 
-# This will be called by Claude which has access to Jira MCP tools
-# For now, create a placeholder that can be replaced with actual MCP calls
-echo "[]" > "$CACHE_FILE"
+# Create a marker file to signal Claude to fetch tickets
+FETCH_MARKER="${CACHE_DIR}/fetch-request-$$.txt"
+cat > "$FETCH_MARKER" <<EOF
+CLAUDE: Please use the Jira MCP tools to fetch these tickets.
 
-# TODO: Replace with actual Jira MCP call via Claude
-# The format should be:
-# [
-#   {
-#     "key": "ZEN-1234",
-#     "fields": {
-#       "summary": "Ticket title",
-#       "status": {"name": "In Progress"},
-#       "assignee": {"displayName": "John Doe", "emailAddress": "john@example.com"},
-#       "priority": {"name": "High"},
-#       "issuetype": {"name": "Story"},
-#       "created": "2024-01-01T00:00:00.000+0000",
-#       "updated": "2024-01-02T00:00:00.000+0000"
-#     }
-#   }
-# ]
+Run: mcp__atlassian-mcp__jira_search
+Parameters:
+  jql: "$JQL"
+  fields: "summary,status,assignee,priority,issuetype,created,updated,project"
+  limit: 100
+
+Then save the result JSON to: $CACHE_FILE
+
+The JSON should be an array of issue objects from the Jira API.
+After saving, delete this marker file: $FETCH_MARKER
+EOF
+
+# If being run by Claude, it will see the marker and execute the MCP call
+# If being run by user directly, show instructions
+if [[ -f "$FETCH_MARKER" ]]; then
+    echo "" >&2
+    echo "=== Claude Integration Required ===" >&2
+    echo "This script requires Claude to fetch Jira data using MCP tools." >&2
+    echo "Please run this command through Claude, or see: $FETCH_MARKER" >&2
+    echo "" >&2
+    echo "[]"
+    exit 0
+fi
+
+# After Claude processes the request, the cache file will exist
+if [[ ! -f "$CACHE_FILE" ]] || [[ ! -s "$CACHE_FILE" ]]; then
+    echo "Error: Failed to fetch Jira tickets" >&2
+    echo "[]"
+    exit 1
+fi
 
 if [[ "$FORMAT" == "json" ]]; then
     cat "$CACHE_FILE"
