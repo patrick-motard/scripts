@@ -6,6 +6,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Personal scripts repository containing shell scripts, Ruby scripts, and related utilities for development workflow automation.
 
+## Important: Keep Scripts Generic
+
+**CRITICAL**: This repository must remain generic and free of company-specific information. Never include:
+- Company names, URLs, or domain names (e.g., company.com, company.atlassian.net)
+- Specific repository names (e.g., company-backend, internal-tools)
+- Employee names or email addresses
+- Passwords, API keys, tokens, or credentials
+- Environment variable values specific to a company
+- Any proprietary or confidential information
+
+When creating examples or default configurations:
+- Use placeholder values like `example.com`, `user@example.com`, `my-repo`
+- Make patterns configurable via config files (e.g., `~/.config/tool-name/config.yml`)
+- Provide clear comments showing users where to customize for their environment
+- Use generic project/repo names in examples: `MYPROJECT`, `my-repo`, `repo-one`
+
 ## Script Creation Conventions
 
 When creating new scripts:

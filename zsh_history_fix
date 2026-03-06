@@ -1,7 +1,6 @@
 #!/usr/bin/env sh
 # George Ornbo (shapeshed) http://shapeshed.com
 # License - http://unlicense.org
-# edits/maintenance done by patrick motard :)
 #
 # Fixes a corrupt .zsh_history file
 

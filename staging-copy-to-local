@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 #
+# Copy files from kubernetes pod to local with admin permissions
+# Usage: k8s-admin-copy <pod-name> <remote-path> <local-path>
+#
+# Configuration - set these environment variables or modify defaults
+K8S_CONTEXT="${K8S_CONTEXT:-default-context}"
+K8S_NAMESPACE="${K8S_NAMESPACE:-default}"
+
 pod=$1
 remote_path=$2
 local_path=$3
 
-kubectl --as admin --as-group system:masters --context pod998 -n billing cp "${pod}":$remote_path $local_path
+kubectl --as admin --as-group system:masters --context "$K8S_CONTEXT" -n "$K8S_NAMESPACE" cp "${pod}":$remote_path $local_path
