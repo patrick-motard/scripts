@@ -1,0 +1,36 @@
+#!/bin/bash
+
+# Toggle jira-select popup in tmux
+# If popup is open, close it. If closed, open it.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Check if we're in tmux
+if [[ -z "$TMUX" ]]; then
+    # Not in tmux, just run jira-select directly
+    exec "$SCRIPT_DIR/jira-select" "$@"
+fi
+
+# Use a marker file to track popup state
+TMUX_SESSION=$(tmux display-message -p '#{session_name}')
+MARKER_FILE="/tmp/jira-popup-active-${TMUX_SESSION}"
+
+# Check if popup is open via marker file
+if [[ -f "$MARKER_FILE" ]]; then
+    # Popup is open, close it
+    rm -f "$MARKER_FILE"
+    tmux display-popup -C 2>/dev/null
+    exit 0
+fi
+
+# No popup open, launch it and create marker
+touch "$MARKER_FILE"
+POPUP_WIDTH="80%"
+POPUP_HEIGHT="80%"
+
+# Run popup and cleanup marker when done
+tmux display-popup -E -w "$POPUP_WIDTH" -h "$POPUP_HEIGHT" \
+    "$SCRIPT_DIR/jira-select $*"
+
+# Remove marker file after popup closes
+rm -f "$MARKER_FILE"

@@ -1,0 +1,337 @@
+#!/bin/bash
+
+# Interactive Jira ticket selector using fzf
+# Usage: jira-select [fetch-jira-tickets options...]
+#   Keybindings:
+#     Ctrl-R: Reload/refresh cache
+#     Ctrl-O: Settings (projects, username, cache TTL)
+#
+# Change indicators coming in future iteration
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_DIR="${HOME}/.config/jira-select"
+CONFIG_FILE="${CONFIG_DIR}/config.yml"
+CACHE_DIR="${HOME}/.cache/jira-tickets"
+
+mkdir -p "$CONFIG_DIR" "$CACHE_DIR"
+
+# Check if config exists
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "Jira config not found. Creating default config at $CONFIG_FILE" >&2
+    mkdir -p "$CONFIG_DIR"
+    cat > "$CONFIG_FILE" <<'EOF'
+# Jira Ticket Selector Configuration
+
+# Your Jira username (email)
+username: user@example.com
+
+# Cache TTL in minutes
+cache_ttl_minutes: 30
+
+# Project to repo mapping (supports multiple repos per project)
+# Example:
+# project_repos:
+#   MYPROJECT:
+#     - my-repo
+#   OTHERPROJ:
+#     - repo-one
+#     - repo-two
+project_repos: {}
+EOF
+    echo "Please edit $CONFIG_FILE with your Jira username and project mappings" >&2
+    exit 1
+fi
+
+# Check for required commands
+if ! command -v fzf &> /dev/null; then
+    echo "Error: fzf is not installed" >&2
+    exit 1
+fi
+
+if ! command -v jq &> /dev/null; then
+    echo "Error: jq is not installed" >&2
+    exit 1
+fi
+
+if ! command -v yq &> /dev/null; then
+    echo "Error: yq is not installed (needed to read YAML config)" >&2
+    exit 1
+fi
+
+# Determine clipboard command based on OS
+if command -v pbcopy &> /dev/null; then
+    CLIP_CMD="pbcopy"
+elif command -v xclip &> /dev/null; then
+    CLIP_CMD="xclip -selection clipboard"
+elif command -v xsel &> /dev/null; then
+    CLIP_CMD="xsel --clipboard --input"
+else
+    CLIP_CMD=""
+fi
+
+# Main loop to allow refresh
+REFRESH_MARKER="/tmp/jira-select-refresh-$$"
+SETTINGS_MARKER="/tmp/jira-select-settings-$$"
+trap "rm -f $REFRESH_MARKER $SETTINGS_MARKER" EXIT
+
+while true; do
+    # Fetch tickets as JSON
+    echo "Loading Jira tickets..." >&2
+    TICKET_JSON=$("$SCRIPT_DIR/fetch-jira-tickets" --format json "$@" 2>&2)
+
+    # Clear screen before showing fzf menu
+    clear
+
+    if [[ -z "$TICKET_JSON" ]] || [[ "$TICKET_JSON" == "[]" ]]; then
+        echo "No tickets found."
+        echo ""
+        ACTION=$(printf "Settings\nRefresh\nExit" | fzf \
+            --header="No tickets found" \
+            --prompt="What would you like to do? > ")
+
+        case "$ACTION" in
+            "Settings")
+                "$SCRIPT_DIR/.jira-settings-menu" > "$SETTINGS_MARKER"
+                if [[ -f "$SETTINGS_MARKER" ]]; then
+                    rm -f "$SETTINGS_MARKER"
+                    echo "Settings updated. Press Ctrl-R to refresh tickets with new settings."
+                    sleep 2
+                fi
+                continue
+                ;;
+            "Refresh")
+                rm -rf "$CACHE_DIR"/*
+                continue
+                ;;
+            *)
+                exit 0
+                ;;
+        esac
+    fi
+
+    # Save JSON to temp file for preview lookups
+    TICKET_JSON_FILE=$(mktemp)
+    echo "$TICKET_JSON" > "$TICKET_JSON_FILE"
+    trap "rm -f $TICKET_JSON_FILE $REFRESH_MARKER $SETTINGS_MARKER" EXIT
+
+    # Calculate max column widths from data
+    MAX_KEY=$(echo "$TICKET_JSON" | jq -r '[.[].key | length] | max')
+    MAX_ASSIGNEE=$(echo "$TICKET_JSON" | jq -r '[.[].fields.assignee.displayName // "Unassigned" | length] | max')
+    [[ "$MAX_ASSIGNEE" -gt 20 ]] && MAX_ASSIGNEE=20  # Cap assignee at 20
+
+    # Format tickets for fzf display with colors and aligned columns
+    # Colors: Yellow (key), Blue (status), Green (assignee), White (summary)
+    COL_KEY=$(printf "%-${MAX_KEY}s" "KEY")
+    COL_STATUS=$(printf "%-12s" "STATUS")
+    COL_ASSIGNEE=$(printf "%-${MAX_ASSIGNEE}s" "ASSIGNEE")
+
+    HEADER_ROW="\033[1;97m  ${COL_KEY}│${COL_STATUS}│${COL_ASSIGNEE}│SUMMARY\033[0m│││"
+
+    TICKET_DISPLAY=$(echo -e "$HEADER_ROW"; echo "$TICKET_JSON" | jq -r \
+        --argjson kw "$MAX_KEY" --argjson aw "$MAX_ASSIGNEE" '.[] |
+        (.fields.assignee.displayName // "Unassigned" | .[0:20]) as $assignee |
+        (.fields.status.name | .[0:12]) as $status |
+        "  " +
+        "\u001b[33m\(.key + (" " * ($kw - (.key | length))))\u001b[0m│" +
+        "\u001b[34m" + ($status + (" " * (12 - ($status | length)))) + "\u001b[0m│" +
+        "\u001b[32m" + ($assignee + (" " * ($aw - ($assignee | length)))) + "\u001b[0m│" +
+        "\(.fields.summary)" +
+        "│\(.key)│\(.fields.project.key)│"')
+
+    # Select ticket with fzf
+    SELECTED=$(echo "$TICKET_DISPLAY" | FZF_TICKET_JSON="$TICKET_JSON_FILE" fzf \
+        --ansi \
+        --layout=reverse \
+        --header="Jira Tickets | ^R:Refresh ^O:Settings ^P:PRs" \
+        --header-lines=1 \
+        --delimiter="│" \
+        --with-nth="1,2,3,4" \
+        --bind="ctrl-r:execute-silent(rm -rf $CACHE_DIR/* && touch $REFRESH_MARKER)+abort" \
+        --bind="ctrl-o:execute(bash -c \"$SCRIPT_DIR/.jira-settings-menu > $SETTINGS_MARKER\")+abort" \
+        --bind="ctrl-p:execute($SCRIPT_DIR/pr-select)+abort" \
+        --preview='
+            TICKET_KEY=$(echo {} | cut -d"│" -f5)
+            '"$SCRIPT_DIR"'/.jira-preview "$TICKET_KEY" "$FZF_TICKET_JSON"
+        ' \
+        --preview-window=up:60%:wrap)
+
+    FZF_EXIT_CODE=$?
+    rm -f "$TICKET_JSON_FILE"
+
+    # Check if user changed settings
+    if [[ -f "$SETTINGS_MARKER" ]]; then
+        rm -f "$SETTINGS_MARKER"
+        echo "Settings updated. Press Ctrl-R to refresh tickets with new settings."
+        sleep 2
+        continue
+    fi
+
+    # Check if user pressed Ctrl-R
+    if [[ -f "$REFRESH_MARKER" ]]; then
+        rm -f "$REFRESH_MARKER"
+        echo "Refreshing..."
+        continue
+    fi
+
+    # Exit loop if no selection
+    if [[ -z "$SELECTED" ]]; then
+        exit 0
+    fi
+
+    # Break out of loop to process selection
+    break
+done
+
+# Extract ticket details
+SELECTED_CLEAN=$(echo "$SELECTED" | sed 's/\x1b\[[0-9;]*m//g')
+TICKET_KEY=$(echo "$SELECTED_CLEAN" | cut -d'│' -f5 | xargs)
+TICKET_PROJECT=$(echo "$SELECTED_CLEAN" | cut -d'│' -f6 | xargs)
+TICKET_SUMMARY=$(echo "$SELECTED_CLEAN" | cut -d'│' -f4 | xargs)
+
+# Get Jira base URL from config (required)
+JIRA_BASE_URL=$(yq eval '.jira_base_url' "$HOME/.config/gh-pr-select/config.yml" 2>/dev/null)
+if [[ -z "$JIRA_BASE_URL" ]] || [[ "$JIRA_BASE_URL" == "null" ]]; then
+    echo "Error: jira_base_url not configured in ~/.config/gh-pr-select/config.yml" >&2
+    echo "Please add: jira_base_url: https://your-company.atlassian.net" >&2
+    exit 1
+fi
+TICKET_URL="${JIRA_BASE_URL}/browse/${TICKET_KEY}"
+
+# Build action menu
+ACTION=$(printf "Open ticket in browser\nCreate worktree for this ticket\nCopy ticket URL\nCopy ticket key\nCancel" | fzf \
+    --header="What would you like to do?" \
+    --height=9)
+
+case "$ACTION" in
+    "Open ticket in browser")
+        if command -v open &> /dev/null; then
+            open "$TICKET_URL"
+        elif command -v xdg-open &> /dev/null; then
+            xdg-open "$TICKET_URL"
+        else
+            echo "Error: Cannot open browser" >&2
+            exit 1
+        fi
+        echo "Opened $TICKET_URL"
+        ;;
+    "Create worktree for this ticket")
+        # Source worktree helpers
+        source "$SCRIPT_DIR/.worktree-helpers"
+
+        echo "Creating worktree for $TICKET_KEY: $TICKET_SUMMARY"
+        echo ""
+
+        # Step 1: Determine target repos from project mapping
+        MAPPED_REPOS=$(yq eval ".project_repos.${TICKET_PROJECT}[]" "$CONFIG_FILE" 2>/dev/null)
+
+        if [[ -z "$MAPPED_REPOS" ]]; then
+            echo "Error: No repos mapped for project $TICKET_PROJECT" >&2
+            echo "Please add repo mapping in $CONFIG_FILE" >&2
+            exit 1
+        fi
+
+        REPOS_ARRAY=()
+        while IFS= read -r repo; do
+            [[ -n "$repo" ]] && REPOS_ARRAY+=("$repo")
+        done <<< "$MAPPED_REPOS"
+
+        echo "Mapped repos for $TICKET_PROJECT: ${REPOS_ARRAY[*]}"
+        echo ""
+
+        # Step 2: Check existing local worktrees
+        echo "Checking existing worktrees..."
+        if find_worktree_by_ticket "$TICKET_KEY"; then
+            echo "✓ Found existing worktree: $FOUND_WORKTREE_PATH"
+
+            # Extract repo and branch from path
+            WORKTREE_REPO=$(basename "$(dirname "$FOUND_WORKTREE_PATH")")
+            WORKTREE_BRANCH=$(basename "$FOUND_WORKTREE_PATH")
+
+            create_tmux_session "$WORKTREE_REPO" "$WORKTREE_BRANCH" "$FOUND_WORKTREE_PATH"
+            exit 0
+        fi
+        echo "No existing worktree found."
+        echo ""
+
+        # Step 3: Check remote branches in mapped repos
+        echo "Searching remote branches..."
+        if find_branch_by_ticket "$TICKET_KEY" "${REPOS_ARRAY[@]}"; then
+            echo "✓ Found remote branch: $FOUND_BRANCH_NAME in $FOUND_BRANCH_REPO"
+            echo ""
+
+            if create_worktree "$FOUND_BRANCH_REPO" "$FOUND_BRANCH_NAME"; then
+                run_setup_hook "$FOUND_BRANCH_REPO" "$WORKTREE_PATH" "$FOUND_BRANCH_NAME"
+                create_tmux_session "$FOUND_BRANCH_REPO" "$FOUND_BRANCH_NAME" "$WORKTREE_PATH"
+            else
+                echo "Failed to create worktree" >&2
+                exit 1
+            fi
+            exit 0
+        fi
+        echo "No remote branch found."
+        echo ""
+
+        # Step 4: Create new branch
+        echo "Creating new branch for $TICKET_KEY..."
+        echo ""
+
+        # Select repo if multiple mapped
+        if [[ ${#REPOS_ARRAY[@]} -eq 1 ]]; then
+            TARGET_REPO="${REPOS_ARRAY[0]}"
+        else
+            TARGET_REPO=$(printf "%s\n" "${REPOS_ARRAY[@]}" | fzf \
+                --header="Select repo for new branch" \
+                --height=10)
+
+            if [[ -z "$TARGET_REPO" ]]; then
+                echo "Cancelled"
+                exit 0
+            fi
+        fi
+
+        echo "Target repo: $TARGET_REPO"
+        echo ""
+
+        # Generate branch name: lowercase-ticket-key-sanitized-summary
+        TICKET_KEY_LOWER=$(echo "$TICKET_KEY" | tr '[:upper:]' '[:lower:]')
+        SUMMARY_SANITIZED=$(sanitize_branch_name "$TICKET_SUMMARY")
+        NEW_BRANCH="${TICKET_KEY_LOWER}-${SUMMARY_SANITIZED}"
+
+        # Truncate if too long (max 80 chars)
+        if [[ ${#NEW_BRANCH} -gt 80 ]]; then
+            NEW_BRANCH="${NEW_BRANCH:0:80}"
+            NEW_BRANCH="${NEW_BRANCH%-}"  # Remove trailing dash if present
+        fi
+
+        echo "Branch name: $NEW_BRANCH"
+        echo ""
+
+        if create_worktree "$TARGET_REPO" "$NEW_BRANCH"; then
+            run_setup_hook "$TARGET_REPO" "$WORKTREE_PATH" "$NEW_BRANCH"
+            create_tmux_session "$TARGET_REPO" "$NEW_BRANCH" "$WORKTREE_PATH"
+        else
+            echo "Failed to create worktree" >&2
+            exit 1
+        fi
+        ;;
+    "Copy ticket URL")
+        if [[ -z "$CLIP_CMD" ]]; then
+            echo "Error: No clipboard command available" >&2
+            exit 1
+        fi
+        echo -n "$TICKET_URL" | eval "$CLIP_CMD"
+        echo "Copied ticket URL to clipboard: $TICKET_URL"
+        ;;
+    "Copy ticket key")
+        if [[ -z "$CLIP_CMD" ]]; then
+            echo "Error: No clipboard command available" >&2
+            exit 1
+        fi
+        echo -n "$TICKET_KEY" | eval "$CLIP_CMD"
+        echo "Copied ticket key to clipboard: $TICKET_KEY"
+        ;;
+    "Cancel"|"")
+        echo "Cancelled"
+        exit 0
+        ;;
+esac

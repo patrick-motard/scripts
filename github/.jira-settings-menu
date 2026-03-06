@@ -1,0 +1,82 @@
+#!/bin/bash
+
+# Jira Settings Menu
+# Called from jira-select via Ctrl-O
+
+CONFIG_DIR="${HOME}/.config/jira-select"
+CONFIG_FILE="${CONFIG_DIR}/config.yml"
+PROJECTS_FILE="${CONFIG_DIR}/projects.txt"
+
+# Ensure config exists
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "Error: Config file not found: $CONFIG_FILE" >&2
+    exit 1
+fi
+
+# Read current settings
+CURRENT_USERNAME=$(grep "^username:" "$CONFIG_FILE" | cut -d':' -f2- | xargs)
+CURRENT_TTL=$(grep "^cache_ttl_minutes:" "$CONFIG_FILE" | cut -d':' -f2- | xargs)
+CURRENT_PROJECTS=$(cat "$PROJECTS_FILE" 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
+
+# Show settings menu
+SETTING=$(printf "Edit projects\nEdit username\nEdit cache TTL\nEdit repo mapping\nCancel" | fzf \
+    --header="Settings | Username: $CURRENT_USERNAME | TTL: ${CURRENT_TTL}m | Projects: ${CURRENT_PROJECTS:-none}" \
+    --height=10)
+
+case "$SETTING" in
+    "Edit projects")
+        # Open projects file in editor
+        if [[ -n "$EDITOR" ]]; then
+            "$EDITOR" "$PROJECTS_FILE" < /dev/tty > /dev/tty 2>&1
+        else
+            vi "$PROJECTS_FILE" < /dev/tty > /dev/tty 2>&1
+        fi
+        echo "settings_changed"
+        ;;
+    "Edit username")
+        # Prompt for username
+        echo "Enter Jira username (email): " >&2
+        read -r NEW_USERNAME < /dev/tty
+        if [[ -n "$NEW_USERNAME" ]]; then
+            # Update config file
+            if command -v yq &> /dev/null; then
+                yq eval ".username = \"$NEW_USERNAME\"" -i "$CONFIG_FILE"
+            else
+                # Fallback to sed
+                sed -i.bak "s|^username:.*|username: $NEW_USERNAME|" "$CONFIG_FILE"
+                rm -f "${CONFIG_FILE}.bak"
+            fi
+            echo "Username updated to: $NEW_USERNAME" >&2
+            echo "settings_changed"
+        fi
+        ;;
+    "Edit cache TTL")
+        # Prompt for TTL
+        echo "Enter cache TTL in minutes (current: $CURRENT_TTL): " >&2
+        read -r NEW_TTL < /dev/tty
+        if [[ -n "$NEW_TTL" ]] && [[ "$NEW_TTL" =~ ^[0-9]+$ ]]; then
+            # Update config file
+            if command -v yq &> /dev/null; then
+                yq eval ".cache_ttl_minutes = $NEW_TTL" -i "$CONFIG_FILE"
+            else
+                # Fallback to sed
+                sed -i.bak "s|^cache_ttl_minutes:.*|cache_ttl_minutes: $NEW_TTL|" "$CONFIG_FILE"
+                rm -f "${CONFIG_FILE}.bak"
+            fi
+            echo "Cache TTL updated to: ${NEW_TTL}m" >&2
+            echo "settings_changed"
+        fi
+        ;;
+    "Edit repo mapping")
+        # Open config file in editor to edit project_repos section
+        if [[ -n "$EDITOR" ]]; then
+            "$EDITOR" "$CONFIG_FILE" < /dev/tty > /dev/tty 2>&1
+        else
+            vi "$CONFIG_FILE" < /dev/tty > /dev/tty 2>&1
+        fi
+        echo "settings_changed"
+        ;;
+    *)
+        echo "cancel"
+        ;;
+esac

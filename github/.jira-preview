@@ -1,0 +1,37 @@
+#!/bin/bash
+
+# Preview helper for Jira ticket selector
+# Args: ticket_key, ticket_json_file
+
+TICKET_KEY="$1"
+TICKET_JSON_FILE="$2"
+
+if [[ -z "$TICKET_KEY" ]] || [[ ! -f "$TICKET_JSON_FILE" ]]; then
+    exit 0
+fi
+
+# Extract ticket data
+TICKET=$(jq -r --arg key "$TICKET_KEY" '.[] | select(.key == $key)' "$TICKET_JSON_FILE")
+
+if [[ -z "$TICKET" ]]; then
+    echo "Ticket not found"
+    exit 0
+fi
+
+# Get Jira base URL from config
+JIRA_BASE_URL=$(yq eval '.jira_base_url // "https://jira.example.com"' "$HOME/.config/gh-pr-select/config.yml" 2>/dev/null)
+
+# Format preview
+echo "$TICKET" | jq -r --arg base_url "$JIRA_BASE_URL" '
+"Key: \(.key)",
+"Summary: \(.fields.summary)",
+"Status: \(.fields.status.name)",
+"Assignee: \(.fields.assignee.displayName // "Unassigned")",
+"Priority: \(.fields.priority.name // "None")",
+"Type: \(.fields.issuetype.name)",
+"Project: \(.fields.project.key)",
+"Created: \(.fields.created[:10])",
+"Updated: \(.fields.updated[:10])",
+"",
+"URL: \($base_url)/browse/\(.key)"
+'

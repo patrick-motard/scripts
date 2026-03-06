@@ -15,7 +15,7 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "Example format (YAML array):"
     echo ""
     echo "repos:"
-    echo "  - growth-engine"
+    echo "  - my-repo"
     echo "  - my-other-repo"
     echo ""
     exit 1
@@ -31,7 +31,7 @@ if [[ -z "$repos" ]]; then
     echo "Add repos to the file in YAML array format:"
     echo ""
     echo "repos:"
-    echo "  - growth-engine"
+    echo "  - my-repo"
     echo "  - my-other-repo"
     echo ""
     exit 1

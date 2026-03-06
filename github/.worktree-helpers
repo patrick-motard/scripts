@@ -111,7 +111,7 @@ sanitize_branch_name() {
 }
 
 # Search for existing worktrees containing a ticket key
-# Args: ticket_key (e.g., "PUFFINS-1844")
+# Args: ticket_key (e.g., "PROJ-123")
 # Returns: 0 if found (sets $FOUND_WORKTREE_PATH), 1 if not found
 find_worktree_by_ticket() {
     local ticket_key="$1"
@@ -148,7 +148,7 @@ find_worktree_by_ticket() {
 }
 
 # Search remote branches for ticket key
-# Args: ticket_key (e.g., "PUFFINS-1844"), repos (array of repo names)
+# Args: ticket_key (e.g., "PROJ-123"), repos (array of repo names)
 # Returns: 0 if found (sets $FOUND_BRANCH_REPO and $FOUND_BRANCH_NAME), 1 if not found
 find_branch_by_ticket() {
     local ticket_key="$1"
