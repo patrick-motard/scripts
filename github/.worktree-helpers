@@ -1,0 +1,189 @@
+#!/bin/bash
+
+# Shared worktree helper functions
+# Source this file: source "$SCRIPT_DIR/.worktree-helpers"
+
+WORKTREE_DIR="${WORKTREE_DIR:-$HOME/code/worktrees}"
+
+# Create a worktree for the given repo and branch
+# Args: repo (short name), branch, worktree_dir (optional)
+# Returns: 0 on success, 1 on error
+# Sets: $WORKTREE_PATH (path to created/existing worktree)
+create_worktree() {
+    local repo="$1"
+    local branch="$2"
+    local base_dir="${3:-$WORKTREE_DIR}"
+
+    local repo_path="$base_dir/$repo"
+    local git_dir="$repo_path/.git"
+
+    WORKTREE_PATH="$repo_path/$branch"
+
+    if [[ ! -d "$git_dir" ]]; then
+        echo "Error: Git directory not found: $git_dir" >&2
+        echo "Tip: Clone the repo as a bare repo first:" >&2
+        echo "  mkdir -p $repo_path" >&2
+        echo "  git clone --bare git@github.com:org/$repo.git $git_dir" >&2
+        return 1
+    fi
+
+    # Skip if worktree already exists
+    if [[ -d "$WORKTREE_PATH" ]]; then
+        echo "Worktree already exists: $WORKTREE_PATH"
+        return 0
+    fi
+
+    echo "Creating worktree for $branch in $repo..."
+
+    # Check if branch exists locally or remotely
+    if git --git-dir="$git_dir" show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+        # Local branch exists
+        git --git-dir="$git_dir" worktree add "$WORKTREE_PATH" "$branch"
+    elif git --git-dir="$git_dir" show-ref --verify --quiet "refs/remotes/origin/$branch" 2>/dev/null; then
+        # Remote branch exists, check it out
+        git --git-dir="$git_dir" worktree add "$WORKTREE_PATH" "$branch"
+    else
+        # New branch, create from HEAD of default branch
+        local default_branch=$(git --git-dir="$git_dir" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||')
+        if [[ -z "$default_branch" ]]; then
+            default_branch="main"
+        fi
+        git --git-dir="$git_dir" worktree add -b "$branch" "$WORKTREE_PATH" "$default_branch"
+    fi
+
+    echo "✓ Created worktree at $WORKTREE_PATH"
+    return 0
+}
+
+# Run repo-specific setup hook if it exists
+# Args: repo (short name), worktree_path, branch
+run_setup_hook() {
+    local repo="$1"
+    local worktree_path="$2"
+    local branch="$3"
+
+    local setup_hook="$HOME/code/scripts-private/worktree-setup-${repo}"
+
+    if [[ -x "$setup_hook" ]]; then
+        echo "Running setup hook for $repo..."
+        "$setup_hook" "$worktree_path" "$branch"
+    fi
+}
+
+# Create or switch to tmux session for worktree
+# Args: repo (short name), branch, worktree_path
+create_tmux_session() {
+    local repo="$1"
+    local branch="$2"
+    local worktree_path="$3"
+
+    # Session name format: repo-wt-branch (sanitize for tmux)
+    local session_name="${repo}-wt-${branch}"
+    # Replace invalid tmux session name characters
+    session_name=$(echo "$session_name" | tr './:' '-')
+
+    # Check if we're in tmux
+    if [[ -n "$TMUX" ]]; then
+        # In tmux - switch to or create session
+        if tmux has-session -t "$session_name" 2>/dev/null; then
+            tmux switch-client -t "$session_name"
+        else
+            tmux new-session -d -s "$session_name" -c "$worktree_path"
+            tmux switch-client -t "$session_name"
+        fi
+    else
+        # Not in tmux - attach or create
+        if tmux has-session -t "$session_name" 2>/dev/null; then
+            tmux attach -t "$session_name"
+        else
+            tmux new-session -s "$session_name" -c "$worktree_path"
+        fi
+    fi
+}
+
+# Sanitize text for use in branch names
+# Args: text to sanitize
+# Returns: sanitized text on stdout
+sanitize_branch_name() {
+    local text="$1"
+    # Lowercase, replace spaces/special chars with hyphens, remove consecutive hyphens
+    echo "$text" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]-' '-' | sed 's/^-//;s/-$//'
+}
+
+# Search for existing worktrees containing a ticket key
+# Args: ticket_key (e.g., "PUFFINS-1844")
+# Returns: 0 if found (sets $FOUND_WORKTREE_PATH), 1 if not found
+find_worktree_by_ticket() {
+    local ticket_key="$1"
+    local ticket_key_lower=$(echo "$ticket_key" | tr '[:upper:]' '[:lower:]')
+
+    FOUND_WORKTREE_PATH=""
+
+    # Search all repos in worktree directory
+    if [[ ! -d "$WORKTREE_DIR" ]]; then
+        return 1
+    fi
+
+    for repo_dir in "$WORKTREE_DIR"/*; do
+        if [[ ! -d "$repo_dir/.git" ]]; then
+            continue
+        fi
+
+        # List all worktrees for this repo
+        local worktrees=$(git --git-dir="$repo_dir/.git" worktree list --porcelain | \
+            grep "^worktree" | \
+            sed "s|worktree $repo_dir/||" | \
+            tail -n +2)
+
+        # Check if any worktree contains the ticket key
+        while IFS= read -r worktree_branch; do
+            if [[ "$worktree_branch" == *"$ticket_key_lower"* ]]; then
+                FOUND_WORKTREE_PATH="$repo_dir/$worktree_branch"
+                return 0
+            fi
+        done <<< "$worktrees"
+    done
+
+    return 1
+}
+
+# Search remote branches for ticket key
+# Args: ticket_key (e.g., "PUFFINS-1844"), repos (array of repo names)
+# Returns: 0 if found (sets $FOUND_BRANCH_REPO and $FOUND_BRANCH_NAME), 1 if not found
+find_branch_by_ticket() {
+    local ticket_key="$1"
+    shift
+    local repos=("$@")
+    local ticket_key_lower=$(echo "$ticket_key" | tr '[:upper:]' '[:lower:]')
+
+    FOUND_BRANCH_REPO=""
+    FOUND_BRANCH_NAME=""
+
+    for repo in "${repos[@]}"; do
+        local repo_path="$WORKTREE_DIR/$repo"
+        local git_dir="$repo_path/.git"
+
+        if [[ ! -d "$git_dir" ]]; then
+            continue
+        fi
+
+        # Fetch latest (quietly)
+        git --git-dir="$git_dir" fetch --quiet 2>&1 | grep -v "From\|^\*" || true
+
+        # Search all branches for ticket key
+        local branches=$(git --git-dir="$git_dir" branch -a --format='%(refname:short)' | \
+            sed 's|^origin/||' | \
+            sort -u | \
+            grep -v '^HEAD$')
+
+        while IFS= read -r branch; do
+            if [[ "$branch" == *"$ticket_key_lower"* ]]; then
+                FOUND_BRANCH_REPO="$repo"
+                FOUND_BRANCH_NAME="$branch"
+                return 0
+            fi
+        done <<< "$branches"
+    done
+
+    return 1
+}
