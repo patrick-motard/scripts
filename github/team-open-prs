@@ -75,7 +75,15 @@ if [[ $# -eq 0 ]]; then
     if [[ -f "$CONFIG_FILE" ]]; then
         REPOS=()
         while IFS= read -r line; do
-            [[ -n "$line" ]] && REPOS+=("$line")
+            # Handle both newline-separated and space-separated formats
+            if [[ -n "$line" ]]; then
+                # Split on spaces using parameter expansion
+                setopt sh_word_split 2>/dev/null ||  true  # Enable word splitting in zsh
+                for repo in $line; do
+                    REPOS+=("$repo")
+                done
+                unsetopt sh_word_split 2>/dev/null || true
+            fi
         done < "$CONFIG_FILE"
     else
         echo "No repos configured. Run 'select-repos' to choose repos to watch." >&2
@@ -135,6 +143,22 @@ if [[ "$USE_CACHE" == "true" ]] && [[ -f "$CACHE_FILE" ]]; then
         cat "$CACHE_FILE"
         exit 0
     fi
+
+    # Stale-while-revalidate: serve stale cache immediately, refresh in background
+    # Source config loader for stale threshold multiplier
+    source "$SCRIPT_DIR/.pr-config"
+    STALE_MULTIPLIER=$(get_config stale_threshold_multiplier 3)
+    STALE_THRESHOLD=$((CACHE_TTL * STALE_MULTIPLIER))
+
+    if [[ "$STALE_MULTIPLIER" -gt 0 ]] && [[ $CACHE_AGE -lt $STALE_THRESHOLD ]]; then
+        echo "Serving stale cache (age: ${CACHE_AGE}s), refreshing in background..." >&2
+        # Trigger background refresh - re-run ourselves with --no-cache, writing to same cache file
+        USER_ARGS=""
+        for u in "${USERS[@]}"; do USER_ARGS="$USER_ARGS --user $u"; done
+        ("$0" --no-cache --format "$FORMAT" --age "$DAYS_BACK" $USER_ARGS "${REPOS[@]}" > /dev/null 2>&1 &)
+        cat "$CACHE_FILE"
+        exit 0
+    fi
 fi
 
 # Function to check repo access
@@ -152,13 +176,24 @@ check_repo_access() {
     return 0
 }
 
-# Filter repos to only those we can access
-ACCESSIBLE_REPOS=()
+# Filter repos to only those we can access (parallel)
+ACCESSIBLE_REPOS_FILE=$(mktemp)
 for repo in "${REPOS[@]}"; do
-    if check_repo_access "$repo"; then
-        ACCESSIBLE_REPOS+=("$repo")
-    fi
+    (
+        if check_repo_access "$repo"; then
+            echo "$repo" >> "$ACCESSIBLE_REPOS_FILE"
+        fi
+    ) &
 done
+wait
+
+ACCESSIBLE_REPOS=()
+if [[ -f "$ACCESSIBLE_REPOS_FILE" ]]; then
+    while IFS= read -r repo; do
+        [[ -n "$repo" ]] && ACCESSIBLE_REPOS+=("$repo")
+    done < "$ACCESSIBLE_REPOS_FILE"
+fi
+rm -f "$ACCESSIBLE_REPOS_FILE"
 
 if [[ ${#ACCESSIBLE_REPOS[@]} -eq 0 ]]; then
     echo "Warning: No accessible repos found" >&2
