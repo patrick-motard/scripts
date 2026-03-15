@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""
+Native messaging host for Firefox tab search.
+Firefox extension connects to this; it also listens on a Unix socket
+so Hammerspoon can query tabs and trigger focus.
+
+Socket: /tmp/firefox-tab-search.sock
+Protocol (socket): newline-delimited JSON
+  -> {"action": "list_tabs"}
+  <- {"tabs": [{id, title, url, windowId}]}
+  -> {"action": "focus_tab", "tabId": N, "windowId": N}
+  <- {"ok": true}
+"""
+
+import sys
+import json
+import struct
+import socket
+import os
+import threading
+import logging
+
+SOCKET_PATH = "/tmp/firefox-tab-search.sock"
+LOG_PATH = os.path.expanduser("~/.local/share/firefox-tab-search.log")
+
+logging.basicConfig(
+    filename=LOG_PATH,
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+log = logging.getLogger(__name__)
+
+
+# --- Native messaging protocol (length-prefixed JSON over stdin/stdout) ---
+
+def read_native_message():
+    raw_len = sys.stdin.buffer.read(4)
+    if not raw_len:
+        return None
+    msg_len = struct.unpack("<I", raw_len)[0]
+    data = sys.stdin.buffer.read(msg_len)
+    return json.loads(data)
+
+
+def write_native_message(msg):
+    data = json.dumps(msg).encode("utf-8")
+    sys.stdout.buffer.write(struct.pack("<I", len(data)))
+    sys.stdout.buffer.write(data)
+    sys.stdout.buffer.flush()
+
+
+# --- State shared between Firefox thread and socket thread ---
+
+_pending = {}       # request_id -> threading.Event
+_results = {}       # request_id -> response dict
+_req_id = 0
+_lock = threading.Lock()
+_firefox_write_lock = threading.Lock()
+
+
+def send_to_firefox(msg):
+    with _firefox_write_lock:
+        write_native_message(msg)
+
+
+def request_firefox(msg):
+    global _req_id
+    with _lock:
+        _req_id += 1
+        rid = _req_id
+        event = threading.Event()
+        _pending[rid] = event
+    msg["_id"] = rid
+    send_to_firefox(msg)
+    event.wait(timeout=5)
+    with _lock:
+        result = _results.pop(rid, None)
+        _pending.pop(rid, None)
+    return result
+
+
+# --- Firefox listener thread ---
+
+def firefox_listener():
+    while True:
+        try:
+            msg = read_native_message()
+            if msg is None:
+                log.info("Firefox disconnected")
+                break
+            rid = msg.pop("_id", None)
+            if rid is not None:
+                with _lock:
+                    event = _pending.get(rid)
+                    _results[rid] = msg
+                if event:
+                    event.set()
+        except Exception as e:
+            log.exception("Error reading from Firefox: %s", e)
+            break
+    os._exit(0)
+
+
+# --- Unix socket server for Hammerspoon ---
+
+def handle_client(conn):
+    try:
+        buf = b""
+        while True:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                    log.debug("Socket request: %s", msg)
+                    result = request_firefox(msg)
+                    log.debug("Socket response: %s", result)
+                    response = json.dumps(result or {"error": "timeout"}) + "\n"
+                    conn.sendall(response.encode("utf-8"))
+                except Exception as e:
+                    log.exception("Error handling socket message: %s", e)
+                    conn.sendall((json.dumps({"error": str(e)}) + "\n").encode("utf-8"))
+    except Exception as e:
+        log.exception("Client handler error: %s", e)
+    finally:
+        conn.close()
+
+
+def socket_server():
+    if os.path.exists(SOCKET_PATH):
+        os.unlink(SOCKET_PATH)
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(SOCKET_PATH)
+    server.listen(5)
+    log.info("Listening on %s", SOCKET_PATH)
+    while True:
+        try:
+            conn, _ = server.accept()
+            t = threading.Thread(target=handle_client, args=(conn,), daemon=True)
+            t.start()
+        except Exception as e:
+            log.exception("Socket accept error: %s", e)
+
+
+if __name__ == "__main__":
+    log.info("tab-search-host starting")
+    t = threading.Thread(target=firefox_listener, daemon=True)
+    t.start()
+    socket_server()

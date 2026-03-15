@@ -1,0 +1,78 @@
+#!/usr/bin/env zsh
+
+usage="NAME
+      install - install the Firefox tab search native messaging host
+
+SYNOPSIS
+      install [-h]
+
+DESCRIPTION
+      Installs the native messaging host manifest so Firefox can find it,
+      and installs the Hammerspoon Lua module.
+
+      After running this script:
+        1. Open Firefox
+        2. Go to about:debugging#/runtime/this-firefox
+        3. Click 'Load Temporary Add-on...'
+        4. Select: $(dirname $0)/extension/manifest.json
+        5. The extension will persist until Firefox restarts
+
+      To make the extension permanent, sign it or use a Firefox profile
+      with extensions.autoDisableScopes = 0 in about:config.
+
+EXAMPLES
+      ./install
+"
+
+while (( $# > 0 )); do
+  case "$1" in
+  -h | --help)
+    echo "$usage"
+    exit 0
+    ;;
+  *)
+    echo "Unknown argument: $1" >&2
+    echo "$usage" >&2
+    exit 1
+    ;;
+  esac
+done
+
+SCRIPT_DIR=${0:A:h}
+MANIFEST_SRC="$SCRIPT_DIR/tab_search_host.json"
+NATIVE_MSG_DIR="$HOME/Library/Application Support/Mozilla/NativeMessagingHosts"
+HS_SRC="$SCRIPT_DIR/firefox-tabs.lua"
+HS_DIR="$HOME/.hammerspoon/src"
+
+# Update the path in the manifest to be absolute
+python3 -c "
+import json, os
+with open('$MANIFEST_SRC') as f:
+    m = json.load(f)
+m['path'] = os.path.abspath('$SCRIPT_DIR/tab-search-host')
+with open('$MANIFEST_SRC', 'w') as f:
+    json.dump(m, f, indent=2)
+print('Updated host path in manifest')
+"
+
+# Install native messaging manifest
+mkdir -p "$NATIVE_MSG_DIR"
+cp "$MANIFEST_SRC" "$NATIVE_MSG_DIR/tab_search_host.json"
+echo "Installed native messaging manifest -> $NATIVE_MSG_DIR/tab_search_host.json"
+
+# Make host executable
+chmod +x "$SCRIPT_DIR/tab-search-host"
+echo "Made host executable"
+
+# Install Hammerspoon module
+mkdir -p "$HS_DIR"
+cp "$HS_SRC" "$HS_DIR/firefox-tabs.lua"
+echo "Installed Hammerspoon module -> $HS_DIR/firefox-tabs.lua"
+
+echo ""
+echo "Done. Next steps:"
+echo "  1. Load the extension in Firefox: about:debugging#/runtime/this-firefox"
+echo "     -> Load Temporary Add-on -> $SCRIPT_DIR/extension/manifest.json"
+echo "  2. Reload Hammerspoon (hyper+m -> r)"
+echo "  3. Add 'require(\"src/firefox-tabs\")' to your init.lua"
+echo "  4. Use hyper+t to open the tab switcher"

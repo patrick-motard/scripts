@@ -1,0 +1,9 @@
+{
+  "name": "tab_search_host",
+  "description": "Tab search native messaging host for Hammerspoon integration",
+  "path": "/Users/patrick/code/scripts/firefox-tab-search/tab-search-host",
+  "type": "stdio",
+  "allowed_extensions": [
+    "tab-search-host@local"
+  ]
+}
