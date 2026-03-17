@@ -45,28 +45,36 @@ echo "Finding contributors from watched repos..." >&2
 CONTRIBUTORS_LIST=$(mktemp)
 
 for repo in "${REPOS[@]}"; do
-    echo "Checking ${repo}..." >&2
+    (
+        echo "Checking ${repo}..." >&2
 
-    # Check repo access first
-    REPO_CHECK=$(gh api "repos/${repo}" 2>&1)
-    if echo "$REPO_CHECK" | grep -qi "SAML enforcement\|OAuth token access\|Not Found"; then
-        echo "  Skipping ${repo} - not accessible" >&2
-        continue
-    fi
+        # Check repo access first
+        REPO_CHECK=$(gh api "repos/${repo}" 2>&1)
+        if echo "$REPO_CHECK" | grep -qi "SAML enforcement\|OAuth token access\|Not Found"; then
+            echo "  Skipping ${repo} - not accessible" >&2
+            exit 0
+        fi
 
-    # Get contributors (people who have committed)
-    gh api "repos/${repo}/contributors" --paginate --jq '.[].login' 2>/dev/null | \
-        while read -r user; do
-            echo -e "${user}\t${repo}\tcontributor"
-        done >> "$CONTRIBUTORS_LIST"
+        REPO_TMP=$(mktemp)
 
-    # Also get recent PR authors
-    gh pr list --repo "$repo" --state all --limit 50 --json author 2>/dev/null | \
-        jq -r '.[].author.login' | sort -u | \
-        while read -r user; do
-            echo -e "${user}\t${repo}\tpr-author"
-        done >> "$CONTRIBUTORS_LIST"
+        # Get contributors (people who have committed)
+        gh api "repos/${repo}/contributors" --paginate --jq '.[].login' 2>/dev/null | \
+            while read -r user; do
+                echo -e "${user}\t${repo}\tcontributor"
+            done >> "$REPO_TMP"
+
+        # Also get recent PR authors
+        gh pr list --repo "$repo" --state all --limit 50 --json author 2>/dev/null | \
+            jq -r '.[].author.login' | sort -u | \
+            while read -r user; do
+                echo -e "${user}\t${repo}\tpr-author"
+            done >> "$REPO_TMP"
+
+        cat "$REPO_TMP" >> "$CONTRIBUTORS_LIST"
+        rm -f "$REPO_TMP"
+    ) &
 done
+wait
 
 # Check if we found any contributors
 if [[ ! -s "$CONTRIBUTORS_LIST" ]]; then

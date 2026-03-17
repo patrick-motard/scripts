@@ -41,8 +41,10 @@ fi
 # Calculate date for commit search
 if [[ "$OSTYPE" == "darwin"* ]]; then
     DATE_FILTER=$(date -u -v-${DAYS_BACK}d +"%Y-%m-%d")
+    PR_DATE_FILTER=$(date -u -v-365d +"%Y-%m-%d")
 else
     DATE_FILTER=$(date -u -d "${DAYS_BACK} days ago" +"%Y-%m-%d")
+    PR_DATE_FILTER=$(date -u -d "365 days ago" +"%Y-%m-%d")
 fi
 
 # Get authenticated user
@@ -54,44 +56,60 @@ fi
 
 echo "Finding repos you've worked in recently..." >&2
 
-# Collect all repos
-REPOS_LIST=$(mktemp)
-
-# Get personal repos
-echo "Checking personal repos..." >&2
-gh repo list --json nameWithOwner,pushedAt --limit 50 2>/dev/null | \
-    jq -r '.[] | "\(.nameWithOwner)\t\(.pushedAt[:10])\tpersonal"' >> "$REPOS_LIST"
-
-# Get organization repos where user has committed
+# Collect org list first (needed to fan out per-org fetches)
 ORGS=$(gh api user/orgs --jq '.[].login' 2>/dev/null)
+
+TEMP_DIR=$(mktemp -d)
+
+# Personal repos
+(
+    echo "Checking personal repos..." >&2
+    gh repo list --json nameWithOwner,pushedAt --limit 50 2>/dev/null | \
+        jq -r '.[] | "\(.nameWithOwner)\t\(.pushedAt[:10])\tpersonal"' > "$TEMP_DIR/personal.txt"
+) &
+
+# Per-org repos
 for ORG in $ORGS; do
-    echo "Checking ${ORG} org..." >&2
-
-    # Check if we can access this org (SAML check)
-    ORG_CHECK=$(gh api "orgs/${ORG}" 2>&1)
-    if echo "$ORG_CHECK" | grep -qi "SAML enforcement\|OAuth token access"; then
-        echo "  Skipping ${ORG} - SAML authorization required" >&2
-        continue
-    fi
-
-    gh api "search/commits?q=org:${ORG}+author:${USERNAME}+committer-date:>${DATE_FILTER}&sort=committer-date&order=desc&per_page=100" \
-        --jq '.items | group_by(.repository.full_name) | map({repo: .[0].repository.full_name, last_commit: .[0].commit.committer.date[:10]}) | .[] | "\(.repo)\t\(.last_commit)\torg"' 2>/dev/null >> "$REPOS_LIST"
+    (
+        echo "Checking ${ORG} org..." >&2
+        ORG_CHECK=$(gh api "orgs/${ORG}" 2>&1)
+        if echo "$ORG_CHECK" | grep -qi "SAML enforcement\|OAuth token access"; then
+            echo "  Skipping ${ORG} - SAML authorization required" >&2
+            exit 0
+        fi
+        gh api "search/commits?q=org:${ORG}+author:${USERNAME}+committer-date:>${DATE_FILTER}&sort=committer-date&order=desc&per_page=100" \
+            --jq '.items | group_by(.repository.full_name) | map({repo: .[0].repository.full_name, last_commit: .[0].commit.committer.date[:10]}) | .[] | "\(.repo)\t\(.last_commit)\torg"' \
+            2>/dev/null > "$TEMP_DIR/org-${ORG}.txt"
+    ) &
 done
 
-# Get repos user has participated in (commits, PRs, issues) - catches public repos outside personal/org
-echo "Checking repos you've participated in..." >&2
+# Global participation searches (commits, PRs opened, PRs reviewed)
+(
+    echo "Checking repos you've committed to..." >&2
+    gh api "search/commits?q=author:${USERNAME}+committer-date:>${DATE_FILTER}&sort=committer-date&order=desc&per_page=100" \
+        --jq '.items | group_by(.repository.full_name) | map({repo: .[0].repository.full_name, last_commit: .[0].commit.committer.date[:10]}) | .[] | "\(.repo)\t\(.last_commit)\tcommits"' \
+        2>/dev/null > "$TEMP_DIR/commits.txt"
+) &
 
-# Repos with user's commits (public repos)
-gh api "search/commits?q=author:${USERNAME}+committer-date:>${DATE_FILTER}&sort=committer-date&order=desc&per_page=100" \
-    --jq '.items | group_by(.repository.full_name) | map({repo: .[0].repository.full_name, last_commit: .[0].commit.committer.date[:10]}) | .[] | "\(.repo)\t\(.last_commit)\tcommits"' 2>/dev/null >> "$REPOS_LIST"
+(
+    echo "Checking repos you've opened PRs in..." >&2
+    gh api "search/issues?q=author:${USERNAME}+type:pr+created:>${PR_DATE_FILTER}&sort=created&order=desc&per_page=100" \
+        --jq '.items | group_by(.repository_url) | map({repo: (.[0].repository_url | split("/") | .[-2] + "/" + .[-1]), last_activity: .[0].created_at[:10]}) | .[] | "\(.repo)\t\(.last_activity)\tprs"' \
+        2>/dev/null > "$TEMP_DIR/prs.txt"
+) &
 
-# Repos where user has opened PRs
-gh api "search/issues?q=author:${USERNAME}+type:pr+created:>${DATE_FILTER}&sort=created&order=desc&per_page=100" \
-    --jq '.items | group_by(.repository_url) | map({repo: (.[0].repository_url | split("/") | .[-2] + "/" + .[-1]), last_activity: .[0].created_at[:10]}) | .[] | "\(.repo)\t\(.last_activity)\tprs"' 2>/dev/null >> "$REPOS_LIST"
+(
+    echo "Checking repos you've reviewed PRs in..." >&2
+    gh api "search/issues?q=reviewed-by:${USERNAME}+type:pr+created:>${PR_DATE_FILTER}&sort=created&order=desc&per_page=100" \
+        --jq '.items | group_by(.repository_url) | map({repo: (.[0].repository_url | split("/") | .[-2] + "/" + .[-1]), last_activity: .[0].created_at[:10]}) | .[] | "\(.repo)\t\(.last_activity)\treviews"' \
+        2>/dev/null > "$TEMP_DIR/reviews.txt"
+) &
 
-# Repos where user has reviewed PRs
-gh api "search/issues?q=reviewed-by:${USERNAME}+type:pr+created:>${DATE_FILTER}&sort=created&order=desc&per_page=100" \
-    --jq '.items | group_by(.repository_url) | map({repo: (.[0].repository_url | split("/") | .[-2] + "/" + .[-1]), last_activity: .[0].created_at[:10]}) | .[] | "\(.repo)\t\(.last_activity)\treviews"' 2>/dev/null >> "$REPOS_LIST"
+wait
+
+REPOS_LIST=$(mktemp)
+cat "$TEMP_DIR"/*.txt 2>/dev/null > "$REPOS_LIST"
+rm -rf "$TEMP_DIR"
 
 # Check if we found any repos
 if [[ ! -s "$REPOS_LIST" ]]; then
@@ -161,28 +179,34 @@ echo "" >&2
 echo "Select repos to watch for PRs (TAB to select, ENTER to confirm):" >&2
 echo "[*] = currently selected" >&2
 
-# Build fzf bind command to pre-select first N items (the already-selected ones)
-FZF_LOAD_BIND=""
+# Use fzf for multi-select
+# Pre-select [*] items by: on load, filter to only [*] lines, select-all, then clear filter
+FZF_ARGS=(
+    --multi
+    --header="TAB: toggle | ENTER: confirm | ESC: cancel | [*] = currently selected"
+    --prompt="Select repos > "
+    --preview-window=hidden
+    --bind="ctrl-a:select-all"
+    --bind="ctrl-d:deselect-all"
+)
 if [[ "$SELECTED_COUNT" -gt 0 ]]; then
-    # Build a command like "toggle+down+toggle+down+..." then move back to top
-    TOGGLE_CMDS=""
-    for ((i=0; i<SELECTED_COUNT; i++)); do
-        TOGGLE_CMDS+="toggle+down+"
-    done
-    # Remove trailing + and add first to go back to top
-    TOGGLE_CMDS="${TOGGLE_CMDS%+}+first"
-    FZF_LOAD_BIND="--bind=load:${TOGGLE_CMDS}"
+    FZF_ARGS+=(
+        --listen
+        --sync
+        --bind='load:transform:
+            pos=1
+            curl -s "localhost:$FZF_PORT?limit=100000" | jq -r ".matches[].text" | while IFS= read -r line; do
+                if [[ "$line" == \[*\]* ]]; then
+                    echo -n "+pos(${pos})+select"
+                fi
+                pos=$((pos + 1))
+            done
+            echo +first
+        '
+    )
 fi
 
-# Use fzf for multi-select
-SELECTED=$(echo "$COMBINED" | fzf \
-    --multi \
-    --header="TAB: toggle | ENTER: confirm | ESC: cancel | [*] = currently selected" \
-    --prompt="Select repos > " \
-    --preview-window=hidden \
-    --bind="ctrl-a:select-all" \
-    --bind="ctrl-d:deselect-all" \
-    $FZF_LOAD_BIND)
+SELECTED=$(echo "$COMBINED" | fzf "${FZF_ARGS[@]}")
 
 if [[ -z "$SELECTED" ]]; then
     echo "No repos selected, keeping existing config" >&2

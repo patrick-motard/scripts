@@ -227,7 +227,7 @@ if [[ "$FORMAT" == "json" ]]; then
         REPO_SHORT="${REPO#*/}"
         (
             echo "  - ${REPO_SHORT}..." >&2
-            gh pr list --repo "$REPO" --state open --search "created:>=$DATE_FILTER" \
+            gh pr list --repo "$REPO" --state open \
                 --json author,createdAt,title,number,url,isDraft,labels,headRefName 2>/dev/null | \
                 jq -c ".[] | select($JQ_FILTER) | . + {repo: \"$REPO_SHORT\", fullRepo: \"$REPO\"}" > "$TEMP_DIR/${REPO_SHORT}.json"
         ) &
@@ -293,15 +293,22 @@ if [[ "$FORMAT" == "json" ]]; then
     fi
 else
     # Markdown table format
+    TEMP_DIR=$(mktemp -d)
+    for REPO in "${REPOS[@]}"; do
+        REPO_SHORT="${REPO#*/}"
+        (
+            gh pr list --repo "$REPO" --state open \
+                --json author,createdAt,title,number,url 2>/dev/null | \
+                jq -r ".[] | select($JQ_FILTER) | [\"$REPO_SHORT\", .createdAt[:10], .author.login, .title, .url] | join(\" | \")" \
+                > "$TEMP_DIR/${REPO_SHORT}.txt"
+        ) &
+    done
+    wait
+
     {
         printf "REPO | DATE | AUTHOR | TITLE | LINK\n"
         printf "%s\n" "--- | --- | --- | --- | ---"
-
-        for REPO in "${REPOS[@]}"; do
-            REPO_SHORT="${REPO#*/}"
-            gh pr list --repo "$REPO" --state open --search "created:>=$DATE_FILTER" \
-                --json author,createdAt,title,number,url 2>/dev/null | \
-                jq -r ".[] | select($JQ_FILTER) | [\"$REPO_SHORT\", .createdAt[:10], .author.login, .title, .url] | join(\" | \")"
-        done
+        cat "$TEMP_DIR"/*.txt 2>/dev/null
     } | tee "$CACHE_FILE"
+    rm -rf "$TEMP_DIR"
 fi
