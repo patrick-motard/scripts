@@ -102,4 +102,6 @@ awk '
   --header-first \
   --prompt "filter: " \
   --color "header:italic:yellow" \
+  --delimiter="  " \
+  --nth=2.. \
   --bind "esc:abort,q:abort,enter:abort"
