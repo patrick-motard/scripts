@@ -21,6 +21,8 @@ tmux list-keys 2>/dev/null \
   | sort -k1,1 -k2,2 \
   | fzf \
       --no-sort \
+      --delimiter '  ' \
+      --nth 2.. \
       --style full \
       --reverse \
       --border-label " tmux keybindings " \
