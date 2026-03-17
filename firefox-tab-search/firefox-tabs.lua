@@ -70,7 +70,7 @@ local function queryBookmarks(callback)
         if ok and result and result.bookmarks then
             callback(result.bookmarks, result.openTabs)
         else
-            hs.notify.new({ informativeText = "Bookmark search: bad response" }):send()
+            hs.alert("Bookmark search: bad response: " .. tostring(data):sub(1, 100))
         end
     end, { "-c", "echo '{\"action\":\"list_bookmarks\"}' | nc -U " .. SOCKET_PATH .. " > /tmp/hs-bookmarks.json" }):start()
 end
@@ -85,21 +85,37 @@ end
 
 function showBookmarkChooser()
     queryBookmarks(function(bookmarks, openTabs)
-        -- Build a URL -> tab lookup for quick matching
+        -- Normalize URL: lowercase scheme+host, strip trailing slash and fragment
+        local function normalize(url)
+            url = url:gsub("#.*$", ""):gsub("/%s*$", ""):lower()
+            return url
+        end
+
         local tabByUrl = {}
         for _, tab in ipairs(openTabs or {}) do
-            tabByUrl[tab.url] = tab
+            tabByUrl[normalize(tab.url)] = tab
         end
 
         local choices = {}
         for _, bm in ipairs(bookmarks) do
-            local isOpen = tabByUrl[bm.url] ~= nil
+            local normBm = normalize(bm.url)
+            local matchedTab = tabByUrl[normBm]
+            -- Also check if a tab URL starts with the bookmark URL (handles redirect suffixes)
+            if not matchedTab then
+                for normTab, tab in pairs(tabByUrl) do
+                    if normTab:sub(1, #normBm) == normBm or normBm:sub(1, #normTab) == normTab then
+                        matchedTab = tab
+                        break
+                    end
+                end
+            end
+            local isOpen = matchedTab ~= nil
             table.insert(choices, {
                 text = bm.title,
                 subText = (isOpen and "open - " or "") .. bm.url,
                 bmUrl = bm.url,
                 isOpen = isOpen,
-                openTab = tabByUrl[bm.url],
+                openTab = matchedTab,
             })
         end
 
