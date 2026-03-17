@@ -1,0 +1,105 @@
+#!/usr/bin/env zsh
+
+# NAME
+#   tmux-keybindings-popup
+#
+# SYNOPSIS
+#   tmux-keybindings-popup [conf_file]
+#
+# DESCRIPTION
+#   Parses the tmux config and displays a keybinding cheatsheet in a popup.
+#   Reads comment lines immediately preceding bind-key/bind lines as descriptions.
+#   Designed to be called from tmux: bind-key ? display-popup -E tmux-keybindings-popup
+#
+# ARGUMENTS
+#   conf_file   Path to tmux.conf (default: ~/.local/share/chezmoi/dot_tmux.conf)
+#
+# EXAMPLES
+#   tmux-keybindings-popup
+#   tmux-keybindings-popup ~/.tmux.conf
+
+conf="${1:-$HOME/.local/share/chezmoi/dot_tmux.conf}"
+
+if [[ ! -f "$conf" ]]; then
+  echo "tmux config not found: $conf"
+  exit 1
+fi
+
+# Parse the config: collect comment + bind pairs
+awk '
+/^[[:space:]]*#/ {
+  # Accumulate comment lines as description
+  sub(/^[[:space:]]*#[[:space:]]*/, "", $0)
+  if (pending_comment == "") {
+    pending_comment = $0
+  } else {
+    pending_comment = pending_comment " " $0
+  }
+  next
+}
+
+/^[[:space:]]*bind(-key)?/ {
+  line = $0
+  # Strip leading whitespace
+  sub(/^[[:space:]]+/, "", line)
+
+  # Extract key and description from the bind line
+  # Normalize bind-key -> bind
+  sub(/^bind-key[[:space:]]+/, "bind ", line)
+  sub(/^bind[[:space:]]+/, "", line)
+
+  # Determine table prefix
+  table = "prefix"
+  if (line ~ /^-n[[:space:]]/) {
+    table = "root"
+    sub(/^-n[[:space:]]+/, "", line)
+  } else if (line ~ /^-T[[:space:]]/) {
+    sub(/^-T[[:space:]]+/, "", line)
+    split(line, parts, /[[:space:]]+/)
+    table = parts[1]
+    # Rebuild line without table name
+    sub(/^[^[:space:]]+[[:space:]]+/, "", line)
+    line = line
+  }
+
+  # Repeatability flag
+  repeatable = ""
+  if (line ~ /^-r[[:space:]]/) {
+    repeatable = " (repeatable)"
+    sub(/^-r[[:space:]]+/, "", line)
+  }
+
+  # Extract the key (first token)
+  split(line, parts, /[[:space:]]+/)
+  key = parts[1]
+
+  # Format table+key column
+  if (table == "prefix") {
+    binding = "C-t " key
+  } else if (table == "root") {
+    binding = key
+  } else {
+    binding = "[" table "] " key
+  }
+
+  desc = pending_comment repeatable
+  if (desc == "") desc = "-"
+
+  printf "%-28s  %s\n", binding, desc
+  pending_comment = ""
+  next
+}
+
+# Non-bind, non-comment lines reset the comment buffer
+{
+  pending_comment = ""
+}
+' "$conf" | fzf \
+  --no-sort \
+  --no-mouse \
+  --reverse \
+  --header "tmux keybindings (prefix = C-t)  |  press q or esc to close" \
+  --header-first \
+  --prompt "filter: " \
+  --color "header:italic:yellow" \
+  --bind "esc:abort,q:abort,enter:abort"

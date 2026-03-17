@@ -1,0 +1,38 @@
+#!/usr/bin/env zsh
+# Display all tmux keybindings in a searchable fzf popup.
+# Invoked via: prefix + ?
+
+# Format: TABLE  KEY  COMMAND
+# We pull from list-keys and format for readability
+tmux list-keys 2>/dev/null \
+  | sed 's/bind-key[[:space:]]*//' \
+  | awk '{
+    # Extract flags, table, key, command
+    flags = ""
+    table = "prefix"
+
+    i = 1
+    while (i <= NF) {
+      if ($i == "-r") { flags = flags "(r) "; i++; continue }
+      if ($i == "-T") { table = $(i+1); i+=2; continue }
+      if ($i == "-N") { i+=2; continue }  # skip notes
+      break
+    }
+    key = $i; i++
+    cmd = ""
+    for (; i <= NF; i++) cmd = cmd (cmd ? " " : "") $i
+
+    # Shorten long commands
+    if (length(cmd) > 80) cmd = substr(cmd, 1, 77) "..."
+
+    printf "%-20s  %-20s  %s%s\n", table, key, flags, cmd
+  }' \
+  | sort -k1,1 -k2,2 \
+  | fzf \
+      --no-sort \
+      --reverse \
+      --header "all tmux keybindings  |  esc to close" \
+      --header-first \
+      --prompt "search: " \
+      --color "header:italic:yellow" \
+      --bind "esc:abort,q:abort,enter:abort"
