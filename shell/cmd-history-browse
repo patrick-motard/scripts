@@ -39,34 +39,7 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-if [[ -z "$mode" ]]; then
-  mode=$(printf 'dir-cmd\ncmd\noutput\ncmd-output\nall' \
-    | fzf \
-        --prompt="  mode: " \
-        --header="select history view  (ctrl-c to cancel)" \
-        --height=40% \
-        --border=rounded \
-        --border-label=" cmd-history " \
-        --no-sort)
-  [[ -z "$mode" ]] && exit 0
-fi
-
-# Copy helper: pbcopy on macOS, xclip/xsel on Linux
-copy_cmd="pbcopy"
-if ! command -v pbcopy >/dev/null 2>&1; then
-  if command -v xclip >/dev/null 2>&1; then
-    copy_cmd="xclip -selection clipboard"
-  elif command -v xsel >/dev/null 2>&1; then
-    copy_cmd="xsel --clipboard --input"
-  else
-    copy_cmd="cat"
-  fi
-fi
-
-# Extract the command portion from the selected line for copying.
-# The copy action receives the raw formatted line; we strip the mode-specific
-# prefix to get just the command text.
-extract_cmd="${script_dir}/cmd-history-extract"
+mode="${mode:-dir-cmd}"
 
 tv cmd-history \
   --source-command "${script_dir}/cmd-history-source --mode ${mode}"

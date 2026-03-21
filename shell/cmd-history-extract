@@ -93,20 +93,26 @@ if not match:
     print(needle.strip())
     sys.exit(0)
 
+cmd = match.get("cmd", "")
+cwd = match.get("cwd", "")
+out = match.get("output", "").replace("\\n", "\n")
+
 if field == "cmd":
-    print(match.get("cmd", ""))
+    print(cmd)
 elif field == "output":
-    out = match.get("output", "")
-    print(out.replace("\\n", "\n"))
+    print(out)
 elif field == "cwd":
-    print(match.get("cwd", ""))
+    print(cwd)
+elif field == "dir+cmd":
+    print(f"{cwd}  {cmd}")
+elif field == "cmd+output":
+    print(f"{cmd}\n\n{out}")
 elif field == "all":
-    print(f"ts:   {match.get('ts', '')}")
-    print(f"cwd:  {match.get('cwd', '')}")
-    print(f"cmd:  {match.get('cmd', '')}")
-    print(f"exit: {match.get('exit_code', '')}")
-    out = match.get("output", "")
-    print(f"output:\n{out.replace(chr(92)+'n', chr(10))}")
+    print(f"ts:        {match.get('ts', '')}")
+    print(f"directory: {cwd}")
+    print(f"command:   {cmd}")
+    print(f"exit code: {match.get('exit_code', '')}")
+    print(f"\noutput:\n{out}")
 else:
     print(match.get(field, ""))
 PYEOF
