@@ -3,22 +3,18 @@
 #   claude-pane-copy - browse and copy messages from a Claude pane
 #
 # SYNOPSIS
-#   claude-pane-copy [PANE_ID]
+#   claude-pane-copy PANE_ID
 #
 # DESCRIPTION
 #   Parses the scrollback of a Claude Code session pane and presents
 #   all user messages and assistant responses in fzf. Select one to
 #   copy it to the clipboard.
 #
-#   If no pane is specified, targets the other pane in the current window.
-#   If there are multiple other panes, presents a pane picker first.
-#
 # ARGUMENTS
-#   PANE_ID   Optional tmux pane target (e.g. chezmoi:2.0)
+#   PANE_ID   tmux pane ID (e.g. %22)
 #
 # EXAMPLES
-#   claude-pane-copy
-#   claude-pane-copy chezmoi:2.0
+#   claude-pane-copy %22
 
 target_pane="$1"
 
@@ -27,8 +23,10 @@ if [[ -z "$target_pane" ]]; then
   exit 1
 fi
 
-# ── Capture and parse ────────────────────────────────────────────────────────
+tmp=$(mktemp /tmp/claude-pane-XXXXXX)
+trap "rm -f $tmp" EXIT
 
+# Capture scrollback
 raw=$(tmux capture-pane -p -t "$target_pane" -S -32767 2>/dev/null)
 
 if [[ -z "$raw" ]]; then
@@ -36,80 +34,74 @@ if [[ -z "$raw" ]]; then
   exit 1
 fi
 
-# Parse into tab-separated records: ROLE\tFIRST_LINE\tFULL_CONTENT
-# Written to a temp file so fzf preview can read it by line number
-tmp=$(mktemp /tmp/claude-pane-XXXXXX)
-trap "rm -f $tmp" EXIT
+# ── Parse into records ───────────────────────────────────────────────────────
+# Segments the scrollback by ❯ (user) and ⏺ (assistant) prefix lines.
+# Each record written to $tmp as: ROLE\tCONTENT  (newlines in content -> \x01)
 
-python3 - "$tmp" <<'PYEOF'
-import sys, re
-
-tmp_file = sys.argv[1]
-raw = sys.stdin.read()
-lines = raw.splitlines()
-
-messages = []
-current_role = None
-current_lines = []
-
-def flush(role, lines):
-    content = '\n'.join(lines).strip()
-    if content:
-        messages.append((role, content))
-
-for line in lines:
-    if line.startswith('❯ ') or line.startswith('> '):
-        if current_role:
-            flush(current_role, current_lines)
-        current_role = 'user'
-        current_lines = [line[2:].strip()]
-    elif line.startswith('⏺ '):
-        if current_role == 'user':
-            flush(current_role, current_lines)
-            current_role = 'assistant'
-            current_lines = [line[2:].strip()]
-        elif current_role == 'assistant':
-            current_lines.append(line[2:].strip())
-        else:
-            current_role = 'assistant'
-            current_lines = [line[2:].strip()]
-    elif current_role:
-        current_lines.append(line)
-
-if current_role:
-    flush(current_role, current_lines)
-
-# Write records to temp file: role TAB first_line TAB full_content (newlines -> \x00)
-with open(tmp_file, 'w') as f:
-    for role, content in messages:
-        first_line = content.split('\n')[0][:120]
-        # encode newlines as \x00 so the record stays on one line
-        encoded = content.replace('\n', '\x00')
-        f.write(f"{role}\t{first_line}\t{encoded}\n")
-
-# Print fzf input lines: "  [USER]  first_line" or "  [CLAUDE]  first_line"
-for role, content in messages:
-    first_line = content.split('\n')[0][:120]
-    label = '[YOU]   ' if role == 'user' else '[CLAUDE]'
-    print(f"{label}  {first_line}")
-PYEOF < <(echo "$raw")
+echo "$raw" | awk '
+  function flush(    content) {
+    if (role == "") return
+    content = buf
+    gsub(/\n$/, "", content)       # trim trailing newline
+    gsub(/\n/, "\x01", content)    # encode newlines
+    print role "\t" content >> "'"$tmp"'"
+    buf = ""
+    role = ""
+  }
+  /^❯ |^> / {
+    flush()
+    role = "user"
+    buf = substr($0, 3) "\n"
+    next
+  }
+  /^⏺ / {
+    if (role == "user") flush()
+    if (role == "assistant") {
+      buf = buf substr($0, 4) "\n"
+    } else {
+      role = "assistant"
+      buf = substr($0, 4) "\n"
+    }
+    next
+  }
+  role != "" {
+    buf = buf $0 "\n"
+  }
+  END { flush() }
+'
 
 if [[ ! -s "$tmp" ]]; then
   echo "No messages found in pane $target_pane"
+  read -k1 "?Press any key to exit"
+  exit 1
+fi
+
+# ── Build fzf input ──────────────────────────────────────────────────────────
+# Format: INDEX TAB LABEL  FIRST_LINE
+
+fzf_input=$(awk -F'\t' '
+  {
+    role = $1
+    encoded = $2
+    # decode to get first line
+    content = encoded
+    gsub(/\x01/, "\n", content)
+    n = split(content, lines, "\n")
+    first = lines[1]
+    if (length(first) > 120) first = substr(first, 1, 120)
+    label = (role == "user") ? "[YOU]   " : "[CLAUDE]"
+    printf "%d\t%s  %s\n", NR-1, label, first
+  }
+' "$tmp")
+
+if [[ -z "$fzf_input" ]]; then
+  echo "No messages to display"
   exit 1
 fi
 
 # ── fzf picker ───────────────────────────────────────────────────────────────
 
-selected_line=$(
-  python3 -c "
-import sys
-tmp = open('$tmp').readlines()
-for i, line in enumerate(tmp):
-    role, first, _ = line.split('\t', 2)
-    label = '[YOU]   ' if role == 'user' else '[CLAUDE]'
-    print(f'{i}\t{label}  {first.strip()}')
-" \
+selected=$(echo "$fzf_input" \
   | fzf \
       --no-sort \
       --ansi \
@@ -121,28 +113,18 @@ for i, line in enumerate(tmp):
       --with-nth=2 \
       --preview="
         idx=\$(echo {} | cut -f1)
-        python3 -c \"
-import sys
-lines = open('$tmp').readlines()
-idx = int(sys.argv[1])
-role, first, encoded = lines[idx].split('\t', 2)
-content = encoded.replace('\x00', '\n')
-print(content)
-\" \"\$idx\" | bat --color=always --plain --language=markdown --theme=gruvbox-dark 2>/dev/null
+        awk -F'\t' -v i=\"\$idx\" 'NR==i+1 {
+          gsub(/\x01/, \"\n\", \$2)
+          printf \"%s\", \$2
+        }' '$tmp' \
+        | bat --color=always --plain --language=markdown --theme=gruvbox-dark 2>/dev/null
       " \
-      --preview-window="right:60%:wrap"
-)
+      --preview-window="right:60%:wrap")
 
-[[ -z "$selected_line" ]] && exit 0
+[[ -z "$selected" ]] && exit 0
 
 # ── Copy to clipboard ────────────────────────────────────────────────────────
 
-idx=$(echo "$selected_line" | cut -f1)
-python3 -c "
-import sys
-lines = open('$tmp').readlines()
-idx = int(sys.argv[1])
-role, first, encoded = lines[idx].split('\t', 2)
-content = encoded.strip().replace('\x00', '\n')
-sys.stdout.write(content)
-" "$idx" | pbcopy
+idx=$(echo "$selected" | cut -f1)
+awk -F'\t' -v i="$idx" 'NR==i+1 { gsub(/\x01/, "\n", $2); printf "%s", $2 }' "$tmp" \
+  | pbcopy
