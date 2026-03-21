@@ -26,8 +26,11 @@ fi
 tmp=$(mktemp /tmp/claude-pane-XXXXXX)
 trap "rm -f $tmp" EXIT
 
-# Capture scrollback
-raw=$(tmux capture-pane -p -t "$target_pane" -S -32767 2>/dev/null)
+# Capture scrollback, stripping the Claude Code input box UI at the bottom
+# The input box is bracketed by ─────... separator lines; drop from the last one up
+raw=$(tmux capture-pane -p -t "$target_pane" -S -32767 2>/dev/null \
+  | awk '/^─{10,}$/ { prev_sep = last_sep; last_sep = NR } { lines[NR] = $0 }
+     END { for (i=1; i < prev_sep; i++) print lines[i] }')
 
 if [[ -z "$raw" ]]; then
   echo "Could not capture pane: $target_pane"
@@ -51,16 +54,18 @@ echo "$raw" | awk '
   /^❯ |^> / {
     flush()
     role = "user"
-    buf = substr($0, 3) "\n"
+    line = $0; sub(/^❯ /, "", line); sub(/^> /, "", line)
+    buf = line "\n"
     next
   }
   /^⏺ / {
     if (role == "user") flush()
+    line = $0; sub(/^⏺ /, "", line)
     if (role == "assistant") {
-      buf = buf substr($0, 4) "\n"
+      buf = buf line "\n"
     } else {
       role = "assistant"
-      buf = substr($0, 4) "\n"
+      buf = line "\n"
     }
     next
   }
@@ -79,20 +84,26 @@ fi
 # ── Build fzf input ──────────────────────────────────────────────────────────
 # Format: INDEX TAB LABEL  FIRST_LINE
 
-fzf_input=$(awk -F'\t' '
+total=$(wc -l < "$tmp")
+fzf_input=$(tac "$tmp" | awk -F'\t' -v total="$total" '
   {
     role = $1
     encoded = $2
-    # decode to get first line
     content = encoded
     gsub(/\x01/, "\n", content)
     n = split(content, lines, "\n")
     first = lines[1]
     if (length(first) > 120) first = substr(first, 1, 120)
-    label = (role == "user") ? "[YOU]   " : "[CLAUDE]"
-    printf "%d\t%s  %s\n", NR-1, label, first
+    if (role == "user") {
+      label = "\033[38;2;215;153;33m[YOU]   \033[0m"
+      colored_first = "\033[38;2;215;153;33m" first "\033[0m"
+    } else {
+      label = "\033[38;2;131;165;152m[CLAUDE]\033[0m"
+      colored_first = "\033[38;2;131;165;152m" first "\033[0m"
+    }
+    printf "%d\t%s  %s\n", total-NR, label, colored_first
   }
-' "$tmp")
+')
 
 if [[ -z "$fzf_input" ]]; then
   echo "No messages to display"
@@ -119,7 +130,8 @@ selected=$(echo "$fzf_input" \
         }' '$tmp' \
         | bat --color=always --plain --language=markdown --theme=gruvbox-dark 2>/dev/null
       " \
-      --preview-window="right:60%:wrap")
+      --preview-window="right:60%:wrap" \
+      --color="hl:bold:#fb4934,hl+:bold:#fb4934")
 
 [[ -z "$selected" ]] && exit 0
 
