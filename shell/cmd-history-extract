@@ -1,0 +1,112 @@
+#!/usr/bin/env zsh
+# NAME
+#   cmd-history-extract - extract a field from a cmd-history log entry
+#
+# SYNOPSIS
+#   cmd-history-extract --field FIELD SELECTED_LINE
+#   echo SELECTED_LINE | cmd-history-extract --field FIELD
+#
+# DESCRIPTION
+#   Given a formatted line from cmd-history-source (or piped from stdin),
+#   looks up the original log entry and extracts a specific field.
+#   Used primarily in tv cable actions to get copyable text.
+#
+# ARGUMENTS
+#   --field   Field to extract: cmd | output | cwd | all (default: cmd)
+#
+# EXAMPLES
+#   cmd-history-extract --field cmd " ~/code  git status"
+#   echo " ~/code  git status" | cmd-history-extract --field output
+
+usage="cmd-history-extract [--field FIELD] [SELECTED_LINE]"
+
+field="cmd"
+log_file="${HOME}/.local/share/cmd-history/history.jsonl"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --field) field=$2; shift ;;
+    --log)   log_file=$2; shift ;;
+    -h|--help) echo "$usage"; exit 0 ;;
+    *) break ;;
+  esac
+  shift
+done
+
+# Read selected line from args or stdin
+if [[ $# -gt 0 ]]; then
+  selected="$*"
+else
+  selected=$(cat)
+fi
+
+python3 - "$log_file" "$selected" "$field" <<'PYEOF'
+import sys, json
+
+log_file = sys.argv[1]
+selected = sys.argv[2]
+field    = sys.argv[3]
+
+entries = []
+with open(log_file) as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+
+needle = selected.lstrip()
+if needle and needle[0] in (" ", "✗"):
+    needle = needle[1:].lstrip()
+if "  >>>  " in needle:
+    needle = needle.split("  >>>  ")[0]
+
+needle_stripped = needle.strip()
+cmd_only = needle_stripped.split("  ")[-1].strip() if "  " in needle_stripped else needle_stripped
+
+match = None
+for e in reversed(entries):
+    cwd = e.get("cwd", "")
+    cmd = e.get("cmd", "").replace("\n", " ")
+    if cmd_only and cmd == cmd_only:
+        match = e
+        break
+    if cmd_only and cmd.startswith(cmd_only):
+        match = e
+        break
+    if needle_stripped in cmd or needle_stripped in (cwd + "  " + cmd):
+        match = e
+        break
+
+if not match:
+    for e in reversed(entries):
+        cmd = e.get("cmd", "")
+        if cmd_only in cmd:
+            match = e
+            break
+
+if not match:
+    # Last resort: just print the needle as the command
+    print(needle.strip())
+    sys.exit(0)
+
+if field == "cmd":
+    print(match.get("cmd", ""))
+elif field == "output":
+    out = match.get("output", "")
+    print(out.replace("\\n", "\n"))
+elif field == "cwd":
+    print(match.get("cwd", ""))
+elif field == "all":
+    print(f"ts:   {match.get('ts', '')}")
+    print(f"cwd:  {match.get('cwd', '')}")
+    print(f"cmd:  {match.get('cmd', '')}")
+    print(f"exit: {match.get('exit_code', '')}")
+    out = match.get("output", "")
+    print(f"output:\n{out.replace(chr(92)+'n', chr(10))}")
+else:
+    print(match.get(field, ""))
+PYEOF

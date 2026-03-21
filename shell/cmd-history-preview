@@ -1,0 +1,112 @@
+#!/usr/bin/env zsh
+# NAME
+#   cmd-history-preview - show full details for a selected history entry
+#
+# SYNOPSIS
+#   cmd-history-preview SELECTED_LINE
+#
+# DESCRIPTION
+#   Given a formatted line from cmd-history-source, finds the most recent
+#   matching entry in the history log and displays full details including
+#   the complete command output.
+#
+# ARGUMENTS
+#   SELECTED_LINE  The line selected in tv (passed as {})
+#
+# EXAMPLES
+#   cmd-history-preview " ~/code  git status"
+
+log_file="${HOME}/.local/share/cmd-history/history.jsonl"
+selected="$*"
+
+if [[ ! -f "$log_file" ]]; then
+  echo "(no history log found)"
+  exit 0
+fi
+
+python3 - "$log_file" "$selected" <<'PYEOF'
+import sys, json, re
+
+log_file = sys.argv[1]
+selected = sys.argv[2]
+
+entries = []
+with open(log_file) as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+
+# Strip the leading flag char and try to extract the command
+# Handles formats: "  ~/dir  cmd", "  cmd", "  ts  dir  cmd  >>>  out"
+# Remove leading flag (first char + space)
+needle = selected.lstrip()
+if needle and needle[0] in (" ", "✗"):
+    needle = needle[1:].lstrip()
+
+# Strip output excerpt if present
+if "  >>>  " in needle:
+    needle = needle.split("  >>>  ")[0]
+
+# Extract just the command portion - the last segment after double-space
+# e.g. "~/code  git status" -> "git status"
+# e.g. "2026-03-20  ~/code  git status" -> "git status"
+needle_stripped = needle.strip()
+cmd_only = needle_stripped.split("  ")[-1].strip() if "  " in needle_stripped else needle_stripped
+
+# Find most recent entry where the needle appears in cwd+cmd or just cmd
+match = None
+for e in reversed(entries):
+    cwd = e.get("cwd", "")
+    cmd = e.get("cmd", "").replace("\n", " ")
+    if cmd_only and cmd == cmd_only:
+        match = e
+        break
+    if cmd_only and cmd.startswith(cmd_only):
+        match = e
+        break
+    if needle_stripped in cmd or needle_stripped in (cwd + "  " + cmd):
+        match = e
+        break
+if not match:
+    for e in reversed(entries):
+        cmd = e.get("cmd", "").replace("\n", " ")
+        if cmd_only in cmd:
+            match = e
+            break
+
+if not match:
+    # Fallback: fuzzy match on cmd substring
+    needle_words = needle.strip().split()
+    for e in reversed(entries):
+        cmd = e.get("cmd", "")
+        if all(w in cmd for w in needle_words):
+            match = e
+            break
+
+if not match:
+    print(f"(entry not found for: {needle!r})")
+    sys.exit(0)
+
+ec = match.get("exit_code", 0)
+ec_str = f"{ec} ({'ok' if ec == 0 else 'failed'})"
+
+print(f"Time:      {match.get('ts', '')}")
+print(f"Directory: {match.get('cwd', '')}")
+print(f"Exit code: {ec_str}")
+print(f"Command:   {match.get('cmd', '')}")
+print()
+print("─" * 60)
+output = match.get("output", "")
+if output.strip():
+    # output is stored with literal \n sequences
+    print(output.replace("\\n", "\n"))
+else:
+    print("(no output captured)")
+    print()
+    print("Tip: run 'cmd-capture-on' in a shell to enable output capture")
+PYEOF

@@ -1,0 +1,103 @@
+#!/usr/bin/env zsh
+# NAME
+#   cmd-history-source - emit shell command history entries for tv
+#
+# SYNOPSIS
+#   cmd-history-source [--mode MODE] [--log FILE]
+#
+# DESCRIPTION
+#   Reads the structured command history log and emits formatted lines
+#   suitable for tv consumption. Each line encodes a log entry in a
+#   format that cmd-history-preview can reverse-lookup.
+#
+# ARGUMENTS
+#   --mode    Output mode (default: dir-cmd)
+#               cmd        - command only
+#               dir-cmd    - directory + command
+#               output     - command + output excerpt (skips entries with no output)
+#               cmd-output - command + full output
+#               all        - timestamp + directory + command + output
+#   --log     Path to JSONL log file
+#             (default: ~/.local/share/cmd-history/history.jsonl)
+#
+# EXAMPLES
+#   cmd-history-source
+#   cmd-history-source --mode cmd
+#   cmd-history-source --mode all
+
+usage="cmd-history-source [--mode MODE] [--log FILE]"
+
+mode="dir-cmd"
+log_file="${HOME}/.local/share/cmd-history/history.jsonl"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mode) mode=$2; shift ;;
+    --log)  log_file=$2; shift ;;
+    -h|--help) echo "$usage"; exit 0 ;;
+    *) break ;;
+  esac
+  shift
+done
+
+if [[ ! -f "$log_file" ]]; then
+  echo "(no history log found - run a few commands first)"
+  exit 0
+fi
+
+python3 - "$log_file" "$mode" "$HOME" <<'PYEOF'
+import sys, json, os
+
+log_file = sys.argv[1]
+mode     = sys.argv[2]
+home     = sys.argv[3]
+
+entries = []
+with open(log_file) as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+
+def short_cwd(cwd):
+    if cwd.startswith(home):
+        cwd = "~" + cwd[len(home):]
+    # shorten long paths: ~/a/b/c/d/e -> ~/a/.../d/e
+    parts = cwd.split("/")
+    if len(parts) > 5:
+        cwd = "/".join(parts[:2]) + "/.../" + "/".join(parts[-2:])
+    return cwd
+
+def exit_flag(e):
+    return "✗" if e.get("exit_code", 0) != 0 else " "
+
+for e in reversed(entries):
+    ts   = e.get("ts", "")
+    cwd  = short_cwd(e.get("cwd", ""))
+    cmd  = e.get("cmd", "").replace("\n", " ")
+    out  = e.get("output", "").replace("\\n", "\n")
+    flag = exit_flag(e)
+
+    if mode == "cmd":
+        print(f"{flag} {cmd}")
+    elif mode == "dir-cmd":
+        print(f"{flag} {cwd}  {cmd}")
+    elif mode == "output":
+        if not out.strip():
+            continue
+        first_line = out.split("\n")[0][:80]
+        print(f"{flag} {cmd[:50]}  >>>  {first_line}")
+    elif mode == "cmd-output":
+        first_line = out.split("\n")[0][:80] if out.strip() else "(no output)"
+        print(f"{flag} {cmd}  >>>  {first_line}")
+    elif mode == "all":
+        first_line = out.split("\n")[0][:60] if out.strip() else ""
+        out_part = f"  >>>  {first_line}" if first_line else ""
+        print(f"{flag} {ts}  {cwd}  {cmd}{out_part}")
+    else:
+        print(f"{flag} {cwd}  {cmd}")
+PYEOF
