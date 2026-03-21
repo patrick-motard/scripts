@@ -94,19 +94,32 @@ if not match:
 
 ec = match.get("exit_code", 0)
 ec_str = f"{ec} ({'ok' if ec == 0 else 'failed'})"
+cmd = match.get("cmd", "")
+cwd = match.get("cwd", "")
+output = match.get("output", "").replace("\\n", "\n")
 
-print(f"Time:      {match.get('ts', '')}")
-print(f"Directory: {match.get('cwd', '')}")
-print(f"Exit code: {ec_str}")
-print(f"Command:   {match.get('cmd', '')}")
+W = 60
+
+print(f"  {match.get('ts', '')}   exit: {ec_str}")
 print()
-print("─" * 60)
-output = match.get("output", "")
+
+print("─" * W)
+print("  COMMAND")
+print("─" * W)
+print(cmd)
+print()
+
+print("─" * W)
+print("  DIRECTORY")
+print("─" * W)
+print(cwd)
+print()
+
+print("─" * W)
+print("  OUTPUT")
+print("─" * W)
 if output.strip():
-    # output is stored with literal \n sequences
-    print(output.replace("\\n", "\n"))
+    print(output)
 else:
-    print("(no output captured)")
-    print()
-    print("Tip: run 'cmd-capture-on' in a shell to enable output capture")
+    print("(no output captured — run 'cmd-capture-on' to enable)")
 PYEOF
