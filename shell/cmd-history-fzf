@@ -74,6 +74,9 @@ action=$(
       --preview="
         field=\$(echo {} | awk -F'|' '{print \$1}' | tr -d ' ')
         printf '%s' $(printf '%q' "$selected") \
+          | ${script_dir}/cmd-history-extract --field \"\$field\" \
+          | bat --color=always --plain --language=bash --theme=gruvbox-dark 2>/dev/null \
+          || printf '%s' $(printf '%q' "$selected") \
           | ${script_dir}/cmd-history-extract --field \"\$field\"
       " \
       --preview-window="right:60%:wrap" \

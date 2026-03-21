@@ -93,33 +93,40 @@ if not match:
     sys.exit(0)
 
 ec = match.get("exit_code", 0)
-ec_str = f"{ec} ({'ok' if ec == 0 else 'failed'})"
+ec_str = f"{ec} (ok)" if ec == 0 else f"{ec} (failed)"
 cmd = match.get("cmd", "")
 cwd = match.get("cwd", "")
 output = match.get("output", "").replace("\\n", "\n")
 
+import subprocess, shutil
+
+HAS_BAT = shutil.which("bat") is not None
+THEME = "gruvbox-dark"
 W = 60
 
-print(f"  {match.get('ts', '')}   exit: {ec_str}")
-print()
+def bat(text, lang="bash"):
+    if not HAS_BAT or not text.strip():
+        return text
+    result = subprocess.run(
+        ["bat", "--color=always", "--plain", f"--language={lang}",
+         f"--theme={THEME}"],
+        input=text, capture_output=True, text=True
+    )
+    return result.stdout if result.returncode == 0 else text
 
-print("─" * W)
-print("  COMMAND")
-print("─" * W)
-print(cmd)
-print()
+def separator(label):
+    return f"\033[38;5;244m{'─' * W}\033[0m\n  \033[1m{label}\033[0m\n\033[38;5;244m{'─' * W}\033[0m"
 
-print("─" * W)
-print("  DIRECTORY")
-print("─" * W)
-print(cwd)
+print(f"  \033[38;5;244m{match.get('ts', '')}   exit: {ec_str}\033[0m")
 print()
-
-print("─" * W)
-print("  OUTPUT")
-print("─" * W)
+print(separator("COMMAND"))
+print(bat(cmd, lang="bash"))
+print(separator("DIRECTORY"))
+print(bat(cwd, lang="plain"))
+print()
+print(separator("OUTPUT"))
 if output.strip():
-    print(output)
+    print(bat(output, lang="plain"))
 else:
-    print("(no output captured — run 'cmd-capture-on' to enable)")
+    print("\033[38;5;244m(no output captured — run 'cmd-capture-on' to enable)\033[0m")
 PYEOF
