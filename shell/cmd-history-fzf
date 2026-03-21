@@ -1,0 +1,93 @@
+#!/usr/bin/env zsh
+# NAME
+#   cmd-history-fzf - browse shell command history with fzf
+#
+# SYNOPSIS
+#   cmd-history-fzf
+#
+# DESCRIPTION
+#   Two-stage fzf browser for structured shell command history.
+#
+#   Stage 1: Browse entries (dir + command list, with full detail preview)
+#   Stage 2: Choose what to copy, with a live preview of exactly what
+#            will be copied to the clipboard.
+#
+#   The selected text is written to the clipboard via pbcopy.
+#
+# EXAMPLES
+#   cmd-history-fzf
+
+script_dir="${0:A:h}"
+log_file="${HOME}/.local/share/cmd-history/history.jsonl"
+
+if [[ ! -f "$log_file" ]]; then
+  echo "No history log found at $log_file"
+  echo "Run a few shell commands first - the logger starts automatically."
+  exit 1
+fi
+
+# ── Stage 1: pick an entry ──────────────────────────────────────────────────
+
+selected=$(
+  "${script_dir}/cmd-history-source" --mode dir-cmd \
+  | fzf \
+      --no-sort \
+      --ansi \
+      --border=rounded \
+      --border-label=" cmd-history " \
+      --prompt="  entry: " \
+      --header="  enter to select   esc to quit" \
+      --preview="${script_dir}/cmd-history-preview {}" \
+      --preview-window="right:55%:wrap" \
+      --color="border:#a89984,label:#ebdbb2,preview-border:#83a598"
+)
+
+[[ -z "$selected" ]] && exit 0
+
+# ── Stage 2: pick what to copy ──────────────────────────────────────────────
+#
+# Each action line has the format:  ACTION_KEY  |  Label
+# The preview command extracts ACTION_KEY from the selected action line
+# and calls cmd-history-extract to show exactly what would be copied.
+
+action=$(
+  printf '%s\n' \
+    "cmd        |  Command" \
+    "output     |  Output" \
+    "cmd+output |  Command + Output" \
+    "dir+cmd    |  Directory + Command" \
+    "all        |  All fields" \
+  | fzf \
+      --no-sort \
+      --ansi \
+      --border=rounded \
+      --border-label=" copy what? " \
+      --prompt="  action: " \
+      --header="  enter to copy   esc to go back" \
+      --delimiter="|" \
+      --with-nth="2.." \
+      --preview="
+        field=\$(echo {} | awk -F'|' '{print \$1}' | tr -d ' ')
+        printf '%s' $(printf '%q' "$selected") \
+          | ${script_dir}/cmd-history-extract --field \"\$field\"
+      " \
+      --preview-window="right:60%:wrap" \
+      --color="border:#a89984,label:#ebdbb2,preview-border:#d79921"
+)
+
+[[ -z "$action" ]] && exit 0
+
+field=$(echo "$action" | awk -F'|' '{print $1}' | tr -d ' ')
+
+result=$(
+  printf '%s' "$selected" \
+    | "${script_dir}/cmd-history-extract" --field "$field"
+)
+
+if command -v pbcopy >/dev/null 2>&1; then
+  printf '%s' "$result" | pbcopy
+elif command -v xclip >/dev/null 2>&1; then
+  printf '%s' "$result" | xclip -selection clipboard
+elif command -v xsel >/dev/null 2>&1; then
+  printf '%s' "$result" | xsel --clipboard --input
+fi
