@@ -29,7 +29,7 @@ fi
 # ── Stage 1: pick an entry ──────────────────────────────────────────────────
 
 selected=$(
-  "${script_dir}/cmd-history-source" --mode dir-cmd \
+  "${script_dir}/cmd-history-source" --mode fzf-all \
   | fzf \
       --no-sort \
       --ansi \
@@ -37,10 +37,15 @@ selected=$(
       --border-label=" cmd-history " \
       --prompt="  entry: " \
       --header="  enter to select   esc to quit" \
-      --preview="${script_dir}/cmd-history-preview {}" \
+      --delimiter=$'\t' \
+      --with-nth=1 \
+      --preview="${script_dir}/cmd-history-preview {1}" \
       --preview-window="right:55%:wrap" \
       --color="border:#a89984,label:#ebdbb2,preview-border:#83a598"
 )
+
+# Strip the hidden tab+output field - only pass the display portion to extract
+selected="${selected%%$'\t'*}"
 
 [[ -z "$selected" ]] && exit 0
 

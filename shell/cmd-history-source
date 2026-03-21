@@ -86,6 +86,11 @@ for e in reversed(entries):
         print(f"{flag} {cmd}")
     elif mode == "dir-cmd":
         print(f"{flag} {cwd}  {cmd}")
+    elif mode == "fzf-all":
+        # Tab-delimited: display part \t searchable-but-hidden output
+        # fzf --with-nth=1 shows only the first field, but searches all
+        out_flat = out.replace("\n", " ").replace("\t", " ")
+        print(f"{flag} {cwd}  {cmd}\t{out_flat}")
     elif mode == "output":
         if not out.strip():
             continue
