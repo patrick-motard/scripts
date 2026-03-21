@@ -1,0 +1,35 @@
+#!/usr/bin/env zsh
+# NAME
+#   cmd-history-copy - copy a field from a history entry to clipboard
+#
+# SYNOPSIS
+#   cmd-history-copy FIELD SELECTED_LINE...
+#
+# DESCRIPTION
+#   Receives the field name and the full selected line (as separate args,
+#   which avoids quoting issues with single quotes in the selected text).
+#   Looks up the history entry and copies the requested field to clipboard.
+#
+# ARGUMENTS
+#   FIELD         cmd | output | cwd | all
+#   SELECTED_LINE The remaining args joined as the selected line
+#
+# EXAMPLES
+#   cmd-history-copy cmd   ~/code  git status
+#   cmd-history-copy output  ~/code  git status
+
+field=$1
+shift
+selected="$*"
+
+script_dir="${0:A:h}"
+
+result=$("${script_dir}/cmd-history-extract" --field "$field" "$selected")
+
+if command -v pbcopy >/dev/null 2>&1; then
+  printf '%s' "$result" | pbcopy
+elif command -v xclip >/dev/null 2>&1; then
+  printf '%s' "$result" | xclip -selection clipboard
+elif command -v xsel >/dev/null 2>&1; then
+  printf '%s' "$result" | xsel --clipboard --input
+fi
