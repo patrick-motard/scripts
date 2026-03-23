@@ -476,13 +476,13 @@ PR_FULL_REPO=$(echo "$PR_JSON" | jq -r --arg url "$PR_URL" '.[] | select(.url ==
 
 # Build action menu dynamically based on whether Jira exists
 if [[ -n "$PR_JIRA_URL" ]]; then
-    ACTION=$(printf "Open PR in browser\nOpen Jira in browser\nCreate worktree for this PR\nCopy PR URL\nCopy Jira URL\nCopy title\nCancel" | fzf \
+    ACTION=$(printf "Open PR in browser\nOpen Jira in browser\nCreate worktree for this PR\nCopy PR URL\nCopy Jira URL\nCopy branch name\nCopy title\nCancel" | fzf \
         --header="What would you like to do?" \
-        --height=11)
+        --height=12)
 else
-    ACTION=$(printf "Open PR in browser\nCreate worktree for this PR\nCopy PR URL\nCopy title\nCancel" | fzf \
+    ACTION=$(printf "Open PR in browser\nCreate worktree for this PR\nCopy PR URL\nCopy branch name\nCopy title\nCancel" | fzf \
         --header="What would you like to do?" \
-        --height=9)
+        --height=10)
 fi
 
 case "$ACTION" in
@@ -523,6 +523,18 @@ case "$ACTION" in
         fi
         echo -n "$PR_JIRA_URL" | eval "$CLIP_CMD"
         echo "Copied Jira URL to clipboard: $PR_JIRA_URL"
+        ;;
+    "Copy branch name")
+        if [[ -z "$CLIP_CMD" ]]; then
+            echo "Error: No clipboard command available" >&2
+            exit 1
+        fi
+        if [[ -z "$PR_BRANCH" ]]; then
+            echo "Error: Could not determine PR branch name" >&2
+            exit 1
+        fi
+        echo -n "$PR_BRANCH" | eval "$CLIP_CMD"
+        echo "Copied branch name to clipboard: $PR_BRANCH"
         ;;
     "Copy title")
         if [[ -z "$CLIP_CMD" ]]; then
