@@ -1,0 +1,56 @@
+#!/usr/bin/env zsh
+# Called by terminal-theme-picker fzf --preview with theme name as $1
+
+theme="$1"
+ALACRITTY_THEMES_DIR="$HOME/.config/alacritty/themes"
+TMUX_THEMES_DIR="$HOME/.config/tmux/themes"
+ALACRITTY_CURRENT="$HOME/.config/alacritty/current-theme.toml"
+
+toml="$ALACRITTY_THEMES_DIR/${theme}.toml"
+
+# Apply alacritty colors live
+if [[ -f "$toml" ]]; then
+    cp "$toml" "$ALACRITTY_CURRENT" 2>/dev/null
+    args=()
+    section=""
+    while IFS= read -r line; do
+        if [[ "$line" =~ '^\[(.+)\]$' ]]; then
+            section="${match[1]}"
+            continue
+        fi
+        if [[ "$line" =~ '^([a-z]+)[[:space:]]*=[[:space:]]*"(#[0-9a-fA-F]+)"' ]]; then
+            args+=("${section}.${match[1]}=\"${match[2]}\"")
+        fi
+    done < "$toml"
+    (( ${#args} > 0 )) && alacritty msg config "${args[@]}" 2>/dev/null
+fi
+
+# Apply tmux theme
+if [[ -n "$TMUX" ]] && [[ -f "$TMUX_THEMES_DIR/${theme}.conf" ]]; then
+    tmux source-file "$TMUX_THEMES_DIR/${theme}.conf"
+fi
+
+# Apply neovim colorscheme to all running instances
+for sock in /tmp/nvim*.sock(N) /tmp/nvim-*.sock(N); do
+    [[ -S "$sock" ]] || continue
+    case "$theme" in
+    gruvbox-dark)
+        nvim --server "$sock" --remote-send ':lua vim.opt.background="dark"<CR>:colorscheme gruvbox<CR>' 2>/dev/null ;;
+    gruvbox-dark-hard)
+        nvim --server "$sock" --remote-send ':lua vim.opt.background="dark"<CR>:colorscheme gruvbox<CR>' 2>/dev/null ;;
+    gruvbox-dark-soft)
+        nvim --server "$sock" --remote-send ':lua vim.opt.background="dark"<CR>:colorscheme gruvbox<CR>' 2>/dev/null ;;
+    gruvbox-light)
+        nvim --server "$sock" --remote-send ':lua vim.opt.background="light"<CR>:colorscheme gruvbox<CR>' 2>/dev/null ;;
+    nord)
+        nvim --server "$sock" --remote-send ':colorscheme nordic<CR>' 2>/dev/null ;;
+    nord-light)
+        nvim --server "$sock" --remote-send ':lua vim.opt.background="light"<CR>:colorscheme nordic<CR>' 2>/dev/null ;;
+    esac
+done
+
+# Show theme info in preview pane
+echo "Theme: $theme"
+echo ""
+echo "--- Alacritty colors ---"
+grep -v '^#' "$toml" 2>/dev/null | grep -v '^$'
