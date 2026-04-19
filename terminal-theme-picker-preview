@@ -46,6 +46,8 @@ for sock in /tmp/nvim*.sock(N) /tmp/nvim-*.sock(N); do
         nvim --server "$sock" --remote-send ':colorscheme nordic<CR>' 2>/dev/null ;;
     nord-light)
         nvim --server "$sock" --remote-send ':lua vim.opt.background="light"<CR>:colorscheme nordic<CR>' 2>/dev/null ;;
+    tokyo-night)
+        nvim --server "$sock" --remote-send ':colorscheme tokyonight-night<CR>' 2>/dev/null ;;
     esac
 done
 

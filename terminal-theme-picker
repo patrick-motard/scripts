@@ -70,6 +70,9 @@ nvim_theme_for() {
     nord-light)
         echo "nordic" "vim.opt.background = 'light'"
         ;;
+    tokyo-night)
+        echo "tokyonight-night" ""
+        ;;
     *)
         echo "" ""
         ;;
