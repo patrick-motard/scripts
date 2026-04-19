@@ -1,0 +1,123 @@
+#!/usr/bin/env zsh
+
+usage="NAME
+      terminal-theme-picker - interactively switch alacritty + tmux themes in real time
+
+SYNOPSIS
+      terminal-theme-picker [-h]
+
+DESCRIPTION
+      Opens an fzf picker showing available themes. Previewing a theme applies it
+      live to both alacritty and tmux. Confirming saves the selection. Cancelling
+      (ESC/q/Ctrl-C) restores the previous theme.
+
+      Themes live in ~/.config/alacritty/themes/ and ~/.config/tmux/themes/.
+      The current selection is stored in ~/.local/share/theme-picker/current
+      (machine-local, not tracked in git).
+
+ARGUMENTS
+      -h, --help
+          Show this help message.
+
+EXAMPLES
+      terminal-theme-picker
+      # bind in tmux: bind-key T display-popup -E -w 60% -h 70% 'terminal-theme-picker'
+"
+
+ALACRITTY_THEMES_DIR="$HOME/.config/alacritty/themes"
+TMUX_THEMES_DIR="$HOME/.config/tmux/themes"
+CURRENT_THEME_FILE="$HOME/.local/share/theme-picker/current"
+ALACRITTY_CURRENT="$HOME/.config/alacritty/current-theme.toml"
+TMUX_CURRENT="$HOME/.config/tmux/themes/current-theme.conf"
+
+while (( $# > 0 )); do
+    case "$1" in
+    -h | --help)
+        echo "$usage"
+        exit 0
+        ;;
+    -*)
+        echo "Unknown option: $1" >&2
+        echo "$usage" >&2
+        exit 1
+        ;;
+    *)
+        break
+        ;;
+    esac
+done
+
+apply_theme() {
+    local theme="$1"
+    local alacritty_file="$ALACRITTY_THEMES_DIR/${theme}.toml"
+    local tmux_file="$TMUX_THEMES_DIR/${theme}.conf"
+
+    [[ -f "$alacritty_file" ]] && cp "$alacritty_file" "$ALACRITTY_CURRENT"
+    if [[ -f "$tmux_file" ]] && [[ -n "$TMUX" ]]; then
+        tmux source-file "$tmux_file"
+    fi
+}
+
+save_theme() {
+    local theme="$1"
+    mkdir -p "$(dirname "$CURRENT_THEME_FILE")"
+    echo "$theme" > "$CURRENT_THEME_FILE"
+
+    local tmux_file="$TMUX_THEMES_DIR/${theme}.conf"
+    [[ -f "$tmux_file" ]] && cp "$tmux_file" "$TMUX_CURRENT"
+}
+
+# Read current theme for restore-on-cancel
+original_theme=""
+[[ -f "$CURRENT_THEME_FILE" ]] && original_theme="$(cat "$CURRENT_THEME_FILE")"
+
+# Build theme list (names without extension, sorted)
+themes=()
+for f in "$ALACRITTY_THEMES_DIR"/*.toml; do
+    [[ -f "$f" ]] || continue
+    name="${f:t:r}"  # basename without extension
+    themes+=("$name")
+done
+
+if (( ${#themes} == 0 )); then
+    echo "No themes found in $ALACRITTY_THEMES_DIR" >&2
+    exit 1
+fi
+
+# Export for use in preview subshell
+export ALACRITTY_THEMES_DIR TMUX_THEMES_DIR ALACRITTY_CURRENT TMUX_CURRENT
+
+# Run fzf - preview applies theme live, selection confirms, ESC cancels
+chosen=$(printf '%s\n' "${themes[@]}" | sort | fzf \
+    --prompt "theme > " \
+    --border rounded \
+    --border-label " terminal-theme-picker " \
+    --height 100% \
+    --layout reverse \
+    --preview "
+        cp \"\$ALACRITTY_THEMES_DIR/{}.toml\" \"\$ALACRITTY_CURRENT\" 2>/dev/null
+        if [[ -n \"\$TMUX\" ]] && [[ -f \"\$TMUX_THEMES_DIR/{}.conf\" ]]; then
+            tmux source-file \"\$TMUX_THEMES_DIR/{}.conf\"
+        fi
+        echo 'Theme: {}'
+        echo ''
+        echo '--- Alacritty colors ---'
+        grep -v '^#' \"\$ALACRITTY_THEMES_DIR/{}.toml\" 2>/dev/null | grep -v '^$'
+    " \
+    --preview-window "right:40%:wrap" \
+    --bind "esc:abort" \
+    --bind "ctrl-c:abort" \
+    ${original_theme:+--query "$original_theme"} \
+    ${original_theme:+--select-1})
+
+exit_code=$?
+
+if [[ $exit_code -eq 0 ]] && [[ -n "$chosen" ]]; then
+    apply_theme "$chosen"
+    save_theme "$chosen"
+else
+    # Restore original on cancel
+    if [[ -n "$original_theme" ]]; then
+        apply_theme "$original_theme"
+    fi
+fi
