@@ -35,11 +35,11 @@ for sock in /tmp/nvim*.sock(N) /tmp/nvim-*.sock(N) "${TMPDIR}nvim.${USER}"/**/*.
     [[ -S "$sock" ]] || continue
     case "$theme" in
     gruvbox-dark)
-        nvim --server "$sock" --remote-send ':lua vim.opt.background="dark"<CR>:colorscheme gruvbox<CR>' 2>/dev/null ;;
+        nvim --server "$sock" --remote-send ':set background=dark<CR>:colorscheme gruvbox<CR>' 2>/dev/null ;;
     gruvbox-dark-hard)
-        nvim --server "$sock" --remote-send ':lua vim.opt.background="dark"<CR>:colorscheme gruvbox<CR>' 2>/dev/null ;;
+        nvim --server "$sock" --remote-send ':set background=dark<CR>:colorscheme gruvbox<CR>' 2>/dev/null ;;
     gruvbox-dark-soft)
-        nvim --server "$sock" --remote-send ':lua vim.opt.background="dark"<CR>:colorscheme gruvbox<CR>' 2>/dev/null ;;
+        nvim --server "$sock" --remote-send ':set background=dark<CR>:colorscheme gruvbox<CR>' 2>/dev/null ;;
     nord)
         nvim --server "$sock" --remote-send ':colorscheme nordic<CR>' 2>/dev/null ;;
     tokyo-night)

@@ -75,16 +75,16 @@ nvim_theme_for() {
 
 # Send colorscheme to all running nvim instances
 nvim_apply_theme() {
-    local colorscheme="$1"
-    local before_code="$2"
-    [[ -z "$colorscheme" ]] && return
-
+    local theme="$1"
     for sock in /tmp/nvim*.sock(N) /tmp/nvim-*.sock(N) "${TMPDIR}nvim.${USER}"/**/*.0(N); do
         [[ -S "$sock" ]] || continue
-        if [[ -n "$before_code" ]]; then
-            nvim --server "$sock" --remote-send ":lua ${before_code}<CR>" 2>/dev/null
-        fi
-        nvim --server "$sock" --remote-send ":colorscheme ${colorscheme}<CR>" 2>/dev/null
+        case "$theme" in
+        gruvbox-dark)      nvim --server "$sock" --remote-send ':set background=dark<CR>:colorscheme gruvbox<CR>' 2>/dev/null ;;
+        gruvbox-dark-hard) nvim --server "$sock" --remote-send ':set background=dark<CR>:colorscheme gruvbox<CR>' 2>/dev/null ;;
+        gruvbox-dark-soft) nvim --server "$sock" --remote-send ':set background=dark<CR>:colorscheme gruvbox<CR>' 2>/dev/null ;;
+        nord)              nvim --server "$sock" --remote-send ':colorscheme nordic<CR>' 2>/dev/null ;;
+        tokyo-night)       nvim --server "$sock" --remote-send ':colorscheme tokyonight-night<CR>' 2>/dev/null ;;
+        esac
     done
 }
 
@@ -144,11 +144,7 @@ apply_theme() {
         tmux source-file "$tmux_file"
     fi
 
-    local nvim_info
-    nvim_info=($(nvim_theme_for "$theme"))
-    local colorscheme="${nvim_info[1]}"
-    local before_code="${nvim_info[2]}"
-    nvim_apply_theme "$colorscheme" "$before_code"
+    nvim_apply_theme "$theme"
 }
 
 save_theme() {
