@@ -87,8 +87,14 @@ fi
 # Export for use in preview subshell
 export ALACRITTY_THEMES_DIR TMUX_THEMES_DIR ALACRITTY_CURRENT TMUX_CURRENT
 
+# Build sorted list with current theme first so it starts highlighted
+theme_list=$(printf '%s\n' "${themes[@]}" | sort)
+if [[ -n "$original_theme" ]]; then
+    theme_list=$(printf '%s\n' "$original_theme"; printf '%s\n' "${themes[@]}" | sort | grep -v "^${original_theme}$")
+fi
+
 # Run fzf - preview applies theme live, selection confirms, ESC cancels
-chosen=$(printf '%s\n' "${themes[@]}" | sort | fzf \
+chosen=$(printf '%s\n' "$theme_list" | fzf \
     --prompt "theme > " \
     --border rounded \
     --border-label " terminal-theme-picker " \
@@ -106,9 +112,7 @@ chosen=$(printf '%s\n' "${themes[@]}" | sort | fzf \
     " \
     --preview-window "right:40%:wrap" \
     --bind "esc:abort" \
-    --bind "ctrl-c:abort" \
-    ${original_theme:+--query "$original_theme"} \
-    ${original_theme:+--select-1})
+    --bind "ctrl-c:abort")
 
 exit_code=$?
 
