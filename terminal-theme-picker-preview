@@ -31,21 +31,20 @@ if [[ -n "$TMUX" ]] && [[ -f "$TMUX_THEMES_DIR/${theme}.conf" ]]; then
 fi
 
 # Apply neovim colorscheme to all running instances
-for sock in /tmp/nvim*.sock(N) /tmp/nvim-*.sock(N) "${TMPDIR}nvim.${USER}"/**/*.0(N); do
-    [[ -S "$sock" ]] || continue
-    case "$theme" in
-    gruvbox-dark)
-        nvim --server "$sock" --remote-send ':set background=dark<CR>:colorscheme gruvbox<CR>' 2>/dev/null ;;
-    gruvbox-dark-hard)
-        nvim --server "$sock" --remote-send ':set background=dark<CR>:colorscheme gruvbox<CR>' 2>/dev/null ;;
-    gruvbox-dark-soft)
-        nvim --server "$sock" --remote-send ':set background=dark<CR>:colorscheme gruvbox<CR>' 2>/dev/null ;;
-    nord)
-        nvim --server "$sock" --remote-send ':colorscheme nordic<CR>' 2>/dev/null ;;
-    tokyo-night)
-        nvim --server "$sock" --remote-send ':colorscheme tokyonight-night<CR>' 2>/dev/null ;;
-    esac
-done
+nvim_cmd=""
+case "$theme" in
+gruvbox-dark)      nvim_cmd=":lua require('gruvbox').setup({contrast=''})<CR>:set background=dark<CR>:colorscheme gruvbox<CR>" ;;
+gruvbox-dark-hard) nvim_cmd=":lua require('gruvbox').setup({contrast='hard'})<CR>:set background=dark<CR>:colorscheme gruvbox<CR>" ;;
+gruvbox-dark-soft) nvim_cmd=":lua require('gruvbox').setup({contrast='soft'})<CR>:set background=dark<CR>:colorscheme gruvbox<CR>" ;;
+nord)              nvim_cmd=":colorscheme nordic<CR>" ;;
+tokyo-night)       nvim_cmd=":colorscheme tokyonight-night<CR>" ;;
+esac
+if [[ -n "$nvim_cmd" ]]; then
+    for sock in /tmp/nvim*.sock(N) /tmp/nvim-*.sock(N) "${TMPDIR}nvim.${USER}"/**/*.0(N); do
+        [[ -S "$sock" ]] || continue
+        nvim --server "$sock" --remote-send "$nvim_cmd" 2>/dev/null
+    done
+fi
 
 # Show theme info in preview pane
 echo "Theme: $theme"
