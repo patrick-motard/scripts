@@ -110,12 +110,39 @@ with open(path, 'w') as f:
 PYEOF
 }
 
+# Parse toml color file and push all values via alacritty msg config (live reload)
+alacritty_apply_colors() {
+    local toml_file="$1"
+    [[ -f "$toml_file" ]] || return
+
+    local args=()
+    local section=""
+    while IFS= read -r line; do
+        # Track current [section]
+        if [[ "$line" =~ '^\[(.+)\]$' ]]; then
+            section="${match[1]}"
+            continue
+        fi
+        # Parse key = "value" lines
+        if [[ "$line" =~ '^([a-z]+)[[:space:]]*=[[:space:]]*"(#[0-9a-fA-F]+)"' ]]; then
+            local key="${match[1]}"
+            local val="${match[2]}"
+            args+=("${section}.${key}=\"${val}\"")
+        fi
+    done < "$toml_file"
+
+    (( ${#args} > 0 )) && alacritty msg config "${args[@]}" 2>/dev/null
+}
+
 apply_theme() {
     local theme="$1"
     local alacritty_file="$ALACRITTY_THEMES_DIR/${theme}.toml"
     local tmux_file="$TMUX_THEMES_DIR/${theme}.conf"
 
-    [[ -f "$alacritty_file" ]] && cp "$alacritty_file" "$ALACRITTY_CURRENT"
+    if [[ -f "$alacritty_file" ]]; then
+        cp "$alacritty_file" "$ALACRITTY_CURRENT"
+        alacritty_apply_colors "$alacritty_file"
+    fi
     if [[ -f "$tmux_file" ]] && [[ -n "$TMUX" ]]; then
         tmux source-file "$tmux_file"
     fi
@@ -176,7 +203,20 @@ chosen=$(printf '%s\n' "$theme_list" | fzf \
     --height 100% \
     --layout reverse \
     --preview "
-        cp \"\$ALACRITTY_THEMES_DIR/{}.toml\" \"\$ALACRITTY_CURRENT\" 2>/dev/null
+        toml=\"\$ALACRITTY_THEMES_DIR/{}.toml\"
+        if [[ -f \"\$toml\" ]]; then
+            cp \"\$toml\" \"\$ALACRITTY_CURRENT\" 2>/dev/null
+            # Parse and push colors live via alacritty msg config
+            args=()
+            section=''
+            while IFS= read -r line; do
+                if [[ \"\$line\" =~ '^\[(.+)\]\$' ]]; then section=\"\${match[1]}\"; continue; fi
+                if [[ \"\$line\" =~ '^([a-z]+)[[:space:]]*=[[:space:]]*\"(#[0-9a-fA-F]+)\"' ]]; then
+                    args+=(\"${section}.${match[1]}=\\\"${match[2]}\\\"\")
+                fi
+            done < \"\$toml\"
+            (( \${#args} > 0 )) && alacritty msg config \"\${args[@]}\" 2>/dev/null
+        fi
         if [[ -n \"\$TMUX\" ]] && [[ -f \"\$TMUX_THEMES_DIR/{}.conf\" ]]; then
             tmux source-file \"\$TMUX_THEMES_DIR/{}.conf\"
         fi
