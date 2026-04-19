@@ -1,15 +1,15 @@
 #!/usr/bin/env zsh
 
 usage="NAME
-      terminal-theme-picker - interactively switch alacritty + tmux themes in real time
+      terminal-theme-picker - interactively switch alacritty + tmux + neovim themes in real time
 
 SYNOPSIS
       terminal-theme-picker [-h]
 
 DESCRIPTION
       Opens an fzf picker showing available themes. Previewing a theme applies it
-      live to both alacritty and tmux. Confirming saves the selection. Cancelling
-      (ESC/q/Ctrl-C) restores the previous theme.
+      live to alacritty, tmux, and all running neovim instances. Confirming saves
+      the selection. Cancelling (ESC/Ctrl-C) restores the previous theme.
 
       Themes live in ~/.config/alacritty/themes/ and ~/.config/tmux/themes/.
       The current selection is stored in ~/.local/share/theme-picker/current
@@ -29,6 +29,7 @@ TMUX_THEMES_DIR="$HOME/.config/tmux/themes"
 CURRENT_THEME_FILE="$HOME/.local/share/theme-picker/current"
 ALACRITTY_CURRENT="$HOME/.config/alacritty/current-theme.toml"
 TMUX_CURRENT="$HOME/.config/tmux/themes/current-theme.conf"
+THEMERY_STATE="$HOME/.local/share/nvim-custom/themery/state.json"
 
 while (( $# > 0 )); do
     case "$1" in
@@ -47,6 +48,68 @@ while (( $# > 0 )); do
     esac
 done
 
+# Map terminal theme name → nvim colorscheme + optional before lua code
+nvim_theme_for() {
+    local theme="$1"
+    case "$theme" in
+    gruvbox-dark)
+        echo "gruvbox" "vim.opt.background = 'dark'\nvim.g.gruvbox_contrast_dark = 'medium'"
+        ;;
+    gruvbox-dark-hard)
+        echo "gruvbox" "vim.opt.background = 'dark'\nvim.g.gruvbox_contrast_dark = 'hard'"
+        ;;
+    gruvbox-dark-soft)
+        echo "gruvbox" "vim.opt.background = 'dark'\nvim.g.gruvbox_contrast_dark = 'soft'"
+        ;;
+    gruvbox-light)
+        echo "gruvbox" "vim.opt.background = 'light'"
+        ;;
+    nord)
+        echo "nordic" ""
+        ;;
+    nord-light)
+        echo "nordic" "vim.opt.background = 'light'"
+        ;;
+    *)
+        echo "" ""
+        ;;
+    esac
+}
+
+# Send colorscheme to all running nvim instances
+nvim_apply_theme() {
+    local colorscheme="$1"
+    local before_code="$2"
+    [[ -z "$colorscheme" ]] && return
+
+    for sock in /tmp/nvim*.sock(N) /tmp/nvim-*.sock(N); do
+        [[ -S "$sock" ]] || continue
+        if [[ -n "$before_code" ]]; then
+            nvim --server "$sock" --remote-send ":lua ${before_code}<CR>" 2>/dev/null
+        fi
+        nvim --server "$sock" --remote-send ":colorscheme ${colorscheme}<CR>" 2>/dev/null
+    done
+}
+
+# Update themery state file so nvim picks correct theme on next launch
+nvim_save_state() {
+    local colorscheme="$1"
+    local before_code="$2"
+    [[ -z "$colorscheme" ]] && return
+    [[ ! -f "$THEMERY_STATE" ]] && return
+
+    python3 - "$THEMERY_STATE" "$colorscheme" "$before_code" <<'PYEOF'
+import json, sys
+path, colorscheme, before_code = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path) as f:
+    state = json.load(f)
+state['colorscheme'] = colorscheme
+state['beforeCode'] = before_code.replace('\\n', '\n')
+with open(path, 'w') as f:
+    json.dump(state, f)
+PYEOF
+}
+
 apply_theme() {
     local theme="$1"
     local alacritty_file="$ALACRITTY_THEMES_DIR/${theme}.toml"
@@ -56,6 +119,12 @@ apply_theme() {
     if [[ -f "$tmux_file" ]] && [[ -n "$TMUX" ]]; then
         tmux source-file "$tmux_file"
     fi
+
+    local nvim_info
+    nvim_info=($(nvim_theme_for "$theme"))
+    local colorscheme="${nvim_info[1]}"
+    local before_code="${nvim_info[2]}"
+    nvim_apply_theme "$colorscheme" "$before_code"
 }
 
 save_theme() {
@@ -65,6 +134,12 @@ save_theme() {
 
     local tmux_file="$TMUX_THEMES_DIR/${theme}.conf"
     [[ -f "$tmux_file" ]] && cp "$tmux_file" "$TMUX_CURRENT"
+
+    local nvim_info
+    nvim_info=($(nvim_theme_for "$theme"))
+    local colorscheme="${nvim_info[1]}"
+    local before_code="${nvim_info[2]}"
+    nvim_save_state "$colorscheme" "$before_code"
 }
 
 # Read current theme for restore-on-cancel
@@ -75,7 +150,7 @@ original_theme=""
 themes=()
 for f in "$ALACRITTY_THEMES_DIR"/*.toml; do
     [[ -f "$f" ]] || continue
-    name="${f:t:r}"  # basename without extension
+    name="${f:t:r}"
     themes+=("$name")
 done
 
@@ -105,6 +180,17 @@ chosen=$(printf '%s\n' "$theme_list" | fzf \
         if [[ -n \"\$TMUX\" ]] && [[ -f \"\$TMUX_THEMES_DIR/{}.conf\" ]]; then
             tmux source-file \"\$TMUX_THEMES_DIR/{}.conf\"
         fi
+        for sock in /tmp/nvim*.sock /tmp/nvim-*.sock; do
+            [[ -S \"\$sock\" ]] || continue
+            case '{}' in
+            gruvbox-dark)       nvim --server \"\$sock\" --remote-send ':lua vim.opt.background=\"dark\"<CR>:colorscheme gruvbox<CR>' 2>/dev/null ;;
+            gruvbox-dark-hard)  nvim --server \"\$sock\" --remote-send ':lua vim.opt.background=\"dark\"<CR>:colorscheme gruvbox<CR>' 2>/dev/null ;;
+            gruvbox-dark-soft)  nvim --server \"\$sock\" --remote-send ':lua vim.opt.background=\"dark\"<CR>:colorscheme gruvbox<CR>' 2>/dev/null ;;
+            gruvbox-light)      nvim --server \"\$sock\" --remote-send ':lua vim.opt.background=\"light\"<CR>:colorscheme gruvbox<CR>' 2>/dev/null ;;
+            nord)               nvim --server \"\$sock\" --remote-send ':colorscheme nordic<CR>' 2>/dev/null ;;
+            nord-light)         nvim --server \"\$sock\" --remote-send ':lua vim.opt.background=\"light\"<CR>:colorscheme nordic<CR>' 2>/dev/null ;;
+            esac
+        done
         echo 'Theme: {}'
         echo ''
         echo '--- Alacritty colors ---'
@@ -120,7 +206,6 @@ if [[ $exit_code -eq 0 ]] && [[ -n "$chosen" ]]; then
     apply_theme "$chosen"
     save_theme "$chosen"
 else
-    # Restore original on cancel
     if [[ -n "$original_theme" ]]; then
         apply_theme "$original_theme"
     fi
