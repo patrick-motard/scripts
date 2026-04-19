@@ -31,7 +31,7 @@ if [[ -n "$TMUX" ]] && [[ -f "$TMUX_THEMES_DIR/${theme}.conf" ]]; then
 fi
 
 # Apply neovim colorscheme to all running instances
-for sock in /tmp/nvim*.sock(N) /tmp/nvim-*.sock(N); do
+for sock in /tmp/nvim*.sock(N) /tmp/nvim-*.sock(N) "${TMPDIR}nvim.${USER}"/**/*.0(N); do
     [[ -S "$sock" ]] || continue
     case "$theme" in
     gruvbox-dark)

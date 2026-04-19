@@ -79,7 +79,7 @@ nvim_apply_theme() {
     local before_code="$2"
     [[ -z "$colorscheme" ]] && return
 
-    for sock in /tmp/nvim*.sock(N) /tmp/nvim-*.sock(N); do
+    for sock in /tmp/nvim*.sock(N) /tmp/nvim-*.sock(N) "${TMPDIR}nvim.${USER}"/**/*.0(N); do
         [[ -S "$sock" ]] || continue
         if [[ -n "$before_code" ]]; then
             nvim --server "$sock" --remote-send ":lua ${before_code}<CR>" 2>/dev/null
