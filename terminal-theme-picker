@@ -52,24 +52,24 @@ done
 nvim_theme_for() {
     local theme="$1"
     case "$theme" in
-    gruvbox-dark)
-        echo "gruvbox" "vim.opt.background = 'dark'\nvim.g.gruvbox_contrast_dark = 'medium'"
-        ;;
-    gruvbox-dark-hard)
-        echo "gruvbox" "vim.opt.background = 'dark'\nvim.g.gruvbox_contrast_dark = 'hard'"
-        ;;
-    gruvbox-dark-soft)
-        echo "gruvbox" "vim.opt.background = 'dark'\nvim.g.gruvbox_contrast_dark = 'soft'"
-        ;;
-    nord)
-        echo "nordic" ""
-        ;;
-    tokyo-night)
-        echo "tokyonight-night" ""
-        ;;
-    *)
-        echo "" ""
-        ;;
+    gruvbox-dark)           echo "gruvbox" "vim.opt.background = 'dark'" ;;
+    gruvbox-dark-hard)      echo "gruvbox" "vim.opt.background = 'dark'" ;;
+    gruvbox-dark-soft)      echo "gruvbox" "vim.opt.background = 'dark'" ;;
+    gruvbox-material)       echo "gruvbox-material" "vim.opt.background = 'dark'\nvim.g.gruvbox_material_background = 'medium'" ;;
+    gruvbox-material-hard)  echo "gruvbox-material" "vim.opt.background = 'dark'\nvim.g.gruvbox_material_background = 'hard'" ;;
+    gruvbox-material-soft)  echo "gruvbox-material" "vim.opt.background = 'dark'\nvim.g.gruvbox_material_background = 'soft'" ;;
+    nord)                   echo "nordic" "" ;;
+    nordic)                 echo "nordic" "" ;;
+    kanagawa-wave)          echo "kanagawa-wave" "" ;;
+    kanagawa-dragon)        echo "kanagawa-dragon" "" ;;
+    everforest-hard)        echo "everforest" "vim.opt.background = 'dark'\nvim.g.everforest_background = 'hard'" ;;
+    everforest-medium)      echo "everforest" "vim.opt.background = 'dark'\nvim.g.everforest_background = 'medium'" ;;
+    everforest-soft)        echo "everforest" "vim.opt.background = 'dark'\nvim.g.everforest_background = 'soft'" ;;
+    darkearth)              echo "darkearth" "" ;;
+    tokyo-night)            echo "tokyonight-night" "" ;;
+    tokyonight-storm)       echo "tokyonight-storm" "" ;;
+    tokyonight-moon)        echo "tokyonight-moon" "" ;;
+    *)                      echo "" "" ;;
     esac
 }
 
@@ -78,11 +78,23 @@ nvim_apply_theme() {
     local theme="$1"
     local cmd
     case "$theme" in
-    gruvbox-dark)      cmd=":lua require('gruvbox').setup({contrast=''})<CR>:set background=dark<CR>:colorscheme gruvbox<CR>" ;;
-    gruvbox-dark-hard) cmd=":lua require('gruvbox').setup({contrast='hard'})<CR>:set background=dark<CR>:colorscheme gruvbox<CR>" ;;
-    gruvbox-dark-soft) cmd=":lua require('gruvbox').setup({contrast='soft'})<CR>:set background=dark<CR>:colorscheme gruvbox<CR>" ;;
-    nord)              cmd=":colorscheme nordic<CR>" ;;
-    tokyo-night)       cmd=":colorscheme tokyonight-night<CR>" ;;
+    gruvbox-dark)          cmd=":lua require('gruvbox').setup({contrast=''})<CR>:set background=dark<CR>:colorscheme gruvbox<CR>" ;;
+    gruvbox-dark-hard)     cmd=":lua require('gruvbox').setup({contrast='hard'})<CR>:set background=dark<CR>:colorscheme gruvbox<CR>" ;;
+    gruvbox-dark-soft)     cmd=":lua require('gruvbox').setup({contrast='soft'})<CR>:set background=dark<CR>:colorscheme gruvbox<CR>" ;;
+    gruvbox-material)      cmd=":let g:gruvbox_material_background='medium'<CR>:set background=dark<CR>:colorscheme gruvbox-material<CR>" ;;
+    gruvbox-material-hard) cmd=":let g:gruvbox_material_background='hard'<CR>:set background=dark<CR>:colorscheme gruvbox-material<CR>" ;;
+    gruvbox-material-soft) cmd=":let g:gruvbox_material_background='soft'<CR>:set background=dark<CR>:colorscheme gruvbox-material<CR>" ;;
+    nord)                  cmd=":colorscheme nordic<CR>" ;;
+    nordic)                cmd=":colorscheme nordic<CR>" ;;
+    kanagawa-wave)         cmd=":colorscheme kanagawa-wave<CR>" ;;
+    kanagawa-dragon)       cmd=":colorscheme kanagawa-dragon<CR>" ;;
+    everforest-hard)       cmd=":let g:everforest_background='hard'<CR>:set background=dark<CR>:colorscheme everforest<CR>" ;;
+    everforest-medium)     cmd=":let g:everforest_background='medium'<CR>:set background=dark<CR>:colorscheme everforest<CR>" ;;
+    everforest-soft)       cmd=":let g:everforest_background='soft'<CR>:set background=dark<CR>:colorscheme everforest<CR>" ;;
+    darkearth)             cmd=":colorscheme darkearth<CR>" ;;
+    tokyo-night)           cmd=":colorscheme tokyonight-night<CR>" ;;
+    tokyonight-storm)      cmd=":colorscheme tokyonight-storm<CR>" ;;
+    tokyonight-moon)       cmd=":colorscheme tokyonight-moon<CR>" ;;
     *) return ;;
     esac
     for sock in /tmp/nvim*.sock(N) /tmp/nvim-*.sock(N) "${TMPDIR}nvim.${USER}"/**/*.0(N); do
