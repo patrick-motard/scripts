@@ -222,6 +222,7 @@ if [[ $exit_code -eq 0 ]] && [[ -n "$chosen" ]]; then
     save_theme "$chosen"
 else
     if [[ -n "$original_theme" ]]; then
+        sleep 0.1
         apply_theme "$original_theme"
     fi
 fi
