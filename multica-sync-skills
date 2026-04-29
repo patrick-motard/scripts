@@ -1,0 +1,224 @@
+#!/usr/bin/env zsh
+
+usage="NAME
+      multica-sync-skills - sync skills from a local directory into a Multica workspace
+
+SYNOPSIS
+      multica-sync-skills [-h] [-d DIR] [-n] [-v]
+
+DESCRIPTION
+      Reads SKILL.md files from a directory (one subdirectory per skill) and
+      creates or updates skills in the active Multica workspace. Only updates a
+      skill when its content or description has changed. No AI is involved - this
+      is a pure file-diff-and-CLI-call operation.
+
+      Each skill directory must contain a SKILL.md file with YAML frontmatter:
+        ---
+        name: skill-name
+        description: Short description shown to agents
+        ---
+        ... skill body ...
+
+ARGUMENTS
+      -d, --dir DIR
+          Directory containing skill subdirectories (default: ~/.claude/skills)
+
+      -n, --dry-run
+          Show what would be created/updated without making any changes.
+
+      -v, --verbose
+          Print a line for each skill that is already up to date.
+
+      -h, --help
+          Show this help message.
+
+EXAMPLES
+      multica-sync-skills
+      multica-sync-skills -d ~/code/dotfiles-private/dot_claude/skills
+      multica-sync-skills -d ~/code/dotfiles-private/dot_claude/skills --dry-run
+"
+
+skills_dir="${HOME}/.claude/skills"
+dry_run=0
+verbose=0
+
+while (( $# > 0 )); do
+    case "$1" in
+    -h | --help)
+        echo "$usage"
+        exit 0
+        ;;
+    -d | --dir)
+        skills_dir=$2
+        shift 2
+        ;;
+    -n | --dry-run)
+        dry_run=1
+        shift
+        ;;
+    -v | --verbose)
+        verbose=1
+        shift
+        ;;
+    -*)
+        echo "Unknown option: $1" >&2
+        echo "$usage" >&2
+        exit 1
+        ;;
+    *)
+        break
+        ;;
+    esac
+done
+
+if [[ ! -d "$skills_dir" ]]; then
+    echo "Error: skills directory not found: $skills_dir" >&2
+    exit 1
+fi
+
+# Load existing Multica skills into an associative array keyed by name
+typeset -A existing_ids existing_descriptions existing_contents
+
+existing_json=$(multica skill list --output json 2>/dev/null)
+if [[ $? -ne 0 ]]; then
+    echo "Error: failed to list skills from Multica workspace" >&2
+    exit 1
+fi
+
+while IFS= read -r line; do
+    id=$(echo "$line" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null)
+    name=$(echo "$line" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('name',''))" 2>/dev/null)
+    desc=$(echo "$line" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('description',''))" 2>/dev/null)
+    content=$(echo "$line" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('content',''))" 2>/dev/null)
+    if [[ -n "$name" && -n "$id" ]]; then
+        existing_ids[$name]=$id
+        existing_descriptions[$name]=$desc
+        existing_contents[$name]=$content
+    fi
+done < <(echo "$existing_json" | python3 -c "
+import json, sys
+skills = json.load(sys.stdin)
+for s in skills:
+    print(json.dumps(s))
+" 2>/dev/null)
+
+created=0
+updated=0
+skipped=0
+errors=0
+
+for skill_dir in "$skills_dir"/*/; do
+    skill_file="${skill_dir}SKILL.md"
+    [[ -f "$skill_file" ]] || continue
+
+    # Parse frontmatter (between first pair of --- lines)
+    name=$(python3 - "$skill_file" <<'PYEOF'
+import sys, re
+path = sys.argv[1]
+with open(path) as f:
+    content = f.read()
+m = re.match(r'^---\s*\n(.*?)\n---\s*\n', content, re.DOTALL)
+if not m:
+    sys.exit(0)
+for line in m.group(1).splitlines():
+    if line.startswith('name:'):
+        print(line.split(':', 1)[1].strip())
+        break
+PYEOF
+)
+
+    description=$(python3 - "$skill_file" <<'PYEOF'
+import sys, re
+path = sys.argv[1]
+with open(path) as f:
+    content = f.read()
+m = re.match(r'^---\s*\n(.*?)\n---\s*\n', content, re.DOTALL)
+if not m:
+    sys.exit(0)
+for line in m.group(1).splitlines():
+    if line.startswith('description:'):
+        print(line.split(':', 1)[1].strip())
+        break
+PYEOF
+)
+
+    if [[ -z "$name" ]]; then
+        echo "Warning: no 'name' in frontmatter of $skill_file, skipping" >&2
+        continue
+    fi
+
+    # Full file content is the skill body (everything after frontmatter)
+    body=$(python3 - "$skill_file" <<'PYEOF'
+import sys, re
+path = sys.argv[1]
+with open(path) as f:
+    content = f.read()
+m = re.match(r'^---\s*\n.*?\n---\s*\n', content, re.DOTALL)
+if m:
+    print(content[m.end():], end='')
+else:
+    print(content, end='')
+PYEOF
+)
+
+    if [[ -n "${existing_ids[$name]}" ]]; then
+        # Skill exists - check if update needed
+        skill_id=${existing_ids[$name]}
+        remote_desc=${existing_descriptions[$name]}
+        remote_content=${existing_contents[$name]}
+
+        if [[ "$description" == "$remote_desc" && "$body" == "$remote_content" ]]; then
+            (( verbose )) && echo "  up-to-date  $name"
+            (( skipped++ ))
+            continue
+        fi
+
+        if (( dry_run )); then
+            echo "  would update  $name"
+            (( updated++ ))
+            continue
+        fi
+
+        result=$(multica skill update "$skill_id" \
+            --name "$name" \
+            --description "$description" \
+            --content "$body" \
+            --output json 2>&1)
+        if [[ $? -eq 0 ]]; then
+            echo "  updated  $name"
+            (( updated++ ))
+        else
+            echo "  error updating $name: $result" >&2
+            (( errors++ ))
+        fi
+    else
+        # Skill does not exist - create it
+        if (( dry_run )); then
+            echo "  would create  $name"
+            (( created++ ))
+            continue
+        fi
+
+        result=$(multica skill create \
+            --name "$name" \
+            --description "$description" \
+            --content "$body" \
+            --output json 2>&1)
+        if [[ $? -eq 0 ]]; then
+            echo "  created  $name"
+            (( created++ ))
+        else
+            echo "  error creating $name: $result" >&2
+            (( errors++ ))
+        fi
+    fi
+done
+
+echo ""
+if (( dry_run )); then
+    echo "Dry run complete: $created would be created, $updated would be updated, $skipped already up to date"
+else
+    echo "Done: $created created, $updated updated, $skipped already up to date, $errors errors"
+fi
+
+(( errors > 0 )) && exit 1 || exit 0
